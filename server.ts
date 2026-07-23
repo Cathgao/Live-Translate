@@ -205,6 +205,7 @@ async function startServer() {
         !!(it?.finished || ot?.finished || sc.turnComplete);
 
       if (hasTextChunk && clientAlive) {
+        console.log(`[diag-upstream] text-chunk origLen=${it?.text?.length || 0} transLen=${ot?.text?.length || 0} finished=${chunkFinished} turnComplete=${!!sc.turnComplete}`);
         safeSend(clientWs, {
           type: "transcription",
           originalText: it?.text || "",
@@ -347,8 +348,9 @@ async function startServer() {
     });
   }
 
-  server.listen(PORT, "0.0.0.0", () => {
-    console.log(`Server running on http://0.0.0.0:${PORT}`);
+  const HOST = process.env.HOST || "0.0.0.0";
+  server.listen(PORT, HOST, () => {
+    console.log(`Server running on http://${HOST}:${PORT}`);
     console.log(
       `Live Translate model: models/${LIVE_TRANSLATE_MODEL} (override via GEMINI_LIVE_TRANSLATE_MODEL)`,
     );
