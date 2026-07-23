@@ -44,26 +44,6 @@ function getTargetLanguageCode(targetLang: string): string {
 }
 
 function buildSetupMessage(modelName: string, targetLangCode: string, silenceMs: number) {
-  // 参考官方 Live Translate 指南:
-  //   https://ai.google.dev/gemini-api/docs/live-api/live-translate
-  // 以及官方参考实现 gemini-live-translate-livekit (translation-bridge.ts
-  // 第 423-444 行的 sendGeminiSetup)。
-  //
-  // 关键点(都已被服务端 1007 错误实证过):
-  //   1. WebSocket 的线协议字段统一用 camelCase。`echoTargetLanguage` 不能写成
-  //      `echo_target_language`(之前的代码就写错了)。
-  //   2. `inputAudioTranscription` / `outputAudioTranscription` 是 `setup` 的
-  //      直接子字段,不能放进 `generationConfig`。后者只接 `responseModalities`
-  //      和 `translationConfig`(以及 speechConfig 等)。把这俩塞进
-  //      generationConfig 服务端会返回 "Unknown name inputAudioTranscription
-  //      at 'setup.generation_config' / 1007 Invalid JSON payload"。
-  //   3. `realtimeInputConfig.automaticActivityDetection` 是官方 schema
-  //      (https://ai.google.dev/api/live#automaticactivitydetection) 明确接受
-  //      的对象,所有 5 个子字段 (disabled / startOfSpeechSensitivity /
-  //      prefixPaddingMs / endOfSpeechSensitivity / silenceDurationMs) 都是合法
-  //      的可选字段。这里把 silenceDurationMs 由调用方传入,让用户在 UI 端调。
-  //   4. translationConfig.echoTargetLanguage=true 让模型对源语言已是目标语言的
-  //      输入也发声(parrot),和官方示例保持一致。
   return {
     setup: {
       model: `models/${modelName}`,
@@ -118,7 +98,6 @@ async function startServer() {
       ? requestedModel.replace(/^models\//, "")
       : LIVE_TRANSLATE_MODEL;
     const targetLangCode = getTargetLanguageCode(targetLang);
-    // 客户端 UI 设置项:服务端 VAD 静默阈值。空 / 非法值回退 600。
     const silenceMs = (() => {
       const raw = url.searchParams.get("silenceMs");
       const n = raw == null ? NaN : parseInt(raw, 10);
@@ -135,19 +114,7 @@ async function startServer() {
     let clientAlive = true;
     let totalUpstreamMessages = 0;
     let totalClientAudioBytes = 0;
-    // 本次会话累计 token 消耗。Gemini Live 用 usageMetadata 周期性下发
-    // 每个 period 的 prompt/response token 数,语义在文档里没明确(是
-    // delta 还是累计),所以我们直接累加 delta,无论哪种语义都能正确反映
-    // "本次会话消耗"。
     const sessionUsage = { input: 0, output: 0 };
-    // Keep-alive: 在客户端还没开始发送真实音频之前,周期性向 Gemini Live
-    // 发静音帧防止会话被关闭。客户端一旦发出第一段真音频就停掉。
-    let keepAliveTimer: NodeJS.Timeout | null = null;
-    let sawRealAudio = false;
-    const KEEPALIVE_MS = 250;
-    // 250 ms of Int16LE mono silence at 16 kHz = 4000 frames = 8000 bytes.
-    const SILENCE_RAW = Buffer.alloc(8000, 0);
-    const SILENCE_B64 = SILENCE_RAW.toString("base64");
 
     const apiKey = process.env.GEMINI_API_KEY;
     if (!apiKey) {
@@ -163,32 +130,6 @@ async function startServer() {
 
     const liveUrl = `${GEMINI_LIVE_WSS}?key=${encodeURIComponent(apiKey)}`;
     liveWs = new WebSocket(liveUrl);
-
-    function startKeepAlive() {
-      if (keepAliveTimer) return;
-      console.log(`[keepalive] start, every ${KEEPALIVE_MS}ms`);
-      keepAliveTimer = setInterval(() => {
-        if (!liveWs || liveWs.readyState !== WebSocket.OPEN || !isLiveReady) return;
-        if (sawRealAudio) return; // real audio drives the model now
-        try {
-          liveWs.send(
-            JSON.stringify({
-              realtimeInput: { audio: { data: SILENCE_B64, mimeType: "audio/pcm;rate=16000" } },
-            }),
-          );
-        } catch (e: any) {
-          console.error("[keepalive] send failed", e?.message || e);
-        }
-      }, KEEPALIVE_MS);
-    }
-
-    function stopKeepAlive() {
-      if (keepAliveTimer) {
-        clearInterval(keepAliveTimer);
-        keepAliveTimer = null;
-        console.log(`[keepalive] stop`);
-      }
-    }
 
     const setupTimer = setTimeout(() => {
       if (!isLiveReady && liveWs && liveWs.readyState !== WebSocket.CLOSED) {
@@ -236,7 +177,6 @@ async function startServer() {
         isLiveReady = true;
         clearTimeout(setupTimer);
         console.log(`[live] setupComplete for model=${modelName}`);
-        startKeepAlive();
         return;
       }
 
@@ -254,17 +194,8 @@ async function startServer() {
         }
         return;
       }
-
-      // 3) serverContent: 这是 Live Translate 模型唯一会发的内容容器。
-      //    参考官方 LiveKit 实现 (translation-bridge.ts handleGeminiMessage)
-      //    和官方 Live Translate 文档 —— input/output transcription 和
-      //    turnComplete 一定在 serverContent 下面。
       const sc = msg.serverContent;
       if (!sc) return;
-
-      // 3a) 增量转写文本。把每帧原文/译文原样转发,客户端按顺序拼接即可。
-      //     每个 chunk 上的 `finished` 标志是该 chunk 是否是当前 utterance
-      //     的最后一帧(不等同于 turnComplete,只是该侧转写自然结束)。
       const it = sc.inputTranscription;
       const ot = sc.outputTranscription;
       const hasTextChunk =
@@ -281,21 +212,12 @@ async function startServer() {
           finished: chunkFinished,
         });
       }
-
-      // 3b) 真正的"一句结束"信号 —— 仅在 turnComplete 时发独立事件,
-      //     客户端立即把 pending buffer 落到 base。
       if (sc.turnComplete && clientAlive) {
         safeSend(clientWs, { type: "transcription_finished" });
       }
-
-      // 3c) 模型被打断 —— 让客户端也清掉 in-progress live。
       if (sc.interrupted && clientAlive) {
         safeSend(clientWs, { type: "transcription_interrupted" });
       }
-
-      // 4) Token 用量统计。Gemini Live 周期性下发 usageMetadata,字段是
-      //    promptTokenCount / responseTokenCount / totalTokenCount(也可能有
-      //    thoughtsTokenCount)。我们只统计 prompt + response,忽略思考 token。
       const um = msg.usageMetadata;
       if (um && clientAlive) {
         const deltaIn = typeof um.promptTokenCount === "number" ? um.promptTokenCount : 0;
@@ -308,8 +230,6 @@ async function startServer() {
           outputTokens: sessionUsage.output,
         });
       }
-
-      // 5) 模型生成的翻译音频 —— 透传。
       const parts: any[] | undefined = sc.modelTurn?.parts;
       if (Array.isArray(parts) && clientAlive) {
         for (const part of parts) {
@@ -340,10 +260,9 @@ async function startServer() {
       const reasonStr = reason?.toString?.() || String(reason || "");
       const hadActivity = totalUpstreamMessages > 0 || totalClientAudioBytes > 0;
       console.warn(
-        `[live] upstream closed code=${code} reason=${reasonStr} model=${modelName} (had setup=${isLiveReady}, upstream msgs=${totalUpstreamMessages}, client audio bytes forwarded=${totalClientAudioBytes}, sawRealAudio=${sawRealAudio})`,
+        `[live] upstream closed code=${code} reason=${reasonStr} model=${modelName} (had setup=${isLiveReady}, upstream msgs=${totalUpstreamMessages}, client audio bytes forwarded=${totalClientAudioBytes})`,
       );
       isLiveReady = false;
-      stopKeepAlive();
       // Surface unexpected closes; code 1000 right after setupComplete with
       // no upstream traffic is a useful diagnostic too.
       if (clientAlive && (code !== 1000 || (code === 1000 && !hadActivity))) {
@@ -366,14 +285,9 @@ async function startServer() {
 
       if (typeof msg.audioBlob === "string" && msg.audioBlob.length > 0) {
         totalClientAudioBytes += Math.floor((msg.audioBlob.length * 3) / 4);
-        sawRealAudio = true;
-        stopKeepAlive();
         if (!liveWs || liveWs.readyState !== WebSocket.OPEN || !isLiveReady) {
-          // Drop silently;客户端会看到没回应是因为上游没收到音频。
-          // 录音中避免刷错误提示。
           return;
         }
-        // 客户端 worklet 已经按 ~100 ms 一帧切好 PCM,这里直接透传。
         try {
           liveWs.send(
             JSON.stringify({
@@ -397,7 +311,6 @@ async function startServer() {
       }
 
       if (msg.action === "flush") {
-        // No-op; Gemini Live is continuous-stream, not turn-based.
         return;
       }
     });
@@ -405,7 +318,6 @@ async function startServer() {
     clientWs.on("close", () => {
       clientAlive = false;
       clearTimeout(setupTimer);
-      stopKeepAlive();
       if (liveWs && liveWs.readyState === WebSocket.OPEN) {
         try {
           liveWs.close();
