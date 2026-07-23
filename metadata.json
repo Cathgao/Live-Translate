@@ -1,0 +1,10 @@
+{
+  "name": "Live Translate",
+  "description": "A real-time translation app using Gemini 3.5 Live Translate with speech input and playback.",
+  "requestFramePermissions": [
+    "microphone"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
