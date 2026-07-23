@@ -233,7 +233,11 @@ export default function App() {
   const pendingOrigRef = useRef<string>('');
   const pendingTransRef = useRef<string>('');
   const segmentCommitTimer = useRef<NodeJS.Timeout | null>(null);
-  const SEGMENT_COMMIT_MS = 1500;
+  // 计时器只会在收到"有实际文本增量"的 transcription chunk 时被重置
+  // (见 ws.onmessage 的 if (origDelta || transDelta) 分支)。
+  // 所以当一句话说完、长时间没有新文本,5 秒后就会自动 commit 当前缓冲,
+  // 下一句追加到新行,不等模型发 transcription_finished。
+  const SEGMENT_COMMIT_MS = 5000;
 
   const scrollRefTop = useRef<HTMLDivElement>(null);
   const scrollRefBottom = useRef<HTMLDivElement>(null);
@@ -260,6 +264,7 @@ export default function App() {
   }, [translatedBase, translatedLive]);
 
   const toggleRecording = async () => {
+    console.log('[diag] CLIENT BUILD: 5000ms-with-logs, segmentCommit=', SEGMENT_COMMIT_MS);
     if (isRecording) {
       stopRecording();
     } else {
@@ -347,7 +352,8 @@ export default function App() {
           console.log('[ws recv]', kind, Object.keys(msg).join(','));
         }
 
-        const flushPending = () => {
+        const flushPending = (reason: string) => {
+          console.log(`[commit] flush reason=${reason} orig=${JSON.stringify(pendingOrigRef.current)} trans=${JSON.stringify(pendingTransRef.current)}`);
           const finalOrig = pendingOrigRef.current.trim();
           const finalTrans = pendingTransRef.current.trim();
           if (finalOrig) {
@@ -369,8 +375,9 @@ export default function App() {
         const armSilenceCommit = () => {
           if (segmentCommitTimer.current) clearTimeout(segmentCommitTimer.current);
           segmentCommitTimer.current = setTimeout(() => {
+            console.log(`[commit] timer fired (${SEGMENT_COMMIT_MS}ms)`);
             segmentCommitTimer.current = null;
-            flushPending();
+            flushPending('timer');
           }, SEGMENT_COMMIT_MS);
         };
 
@@ -387,16 +394,20 @@ export default function App() {
               ? pendingTransRef.current + transDelta
               : transDelta;
           }
-          if (origDelta || transDelta) {
+          const hasMeaningfulDelta = origDelta.trim() !== '' || transDelta.trim() !== '';
+          if (hasMeaningfulDelta) {
+            console.log(`[commit] arm timer; pending orig=${JSON.stringify(pendingOrigRef.current)} trans=${JSON.stringify(pendingTransRef.current)}`);
             setOriginalLive(pendingOrigRef.current);
             setTranslatedLive(pendingTransRef.current);
             armSilenceCommit();
+          } else {
+            console.log(`[commit] skip arm timer (no meaningful delta); pending orig=${JSON.stringify(pendingOrigRef.current)} trans=${JSON.stringify(pendingTransRef.current)}`);
           }
           return;
         }
 
         if (msg.type === 'transcription_finished') {
-          flushPending();
+          flushPending('finished');
           return;
         }
 
@@ -840,7 +851,8 @@ export default function App() {
                     className="font-light leading-relaxed text-slate-100 whitespace-pre-wrap break-words"
                     style={{ fontSize: `${settings.fontSize}px`, lineHeight: 1.4 }}
                   >
-                    {base && <span className="text-slate-400">{base}</span>}
+                    <span className="text-slate-400">{base}</span>
+                    {base && live ? '\n\n' : null}
                     <span className="text-slate-100">{live}</span>
                     {isRecording && live && (
                       <span className="inline-block w-2 h-6 ml-1 bg-blue-500 animate-pulse align-middle" style={{ height: `${settings.fontSize * 0.7}px` }}></span>
@@ -925,7 +937,8 @@ export default function App() {
                     className="font-semibold leading-relaxed whitespace-pre-wrap break-words"
                     style={{ fontSize: `${settings.fontSize}px`, lineHeight: 1.4 }}
                   >
-                    {base && <span className="bg-gradient-to-r from-slate-500 via-slate-400 to-slate-500 bg-clip-text text-transparent">{base}</span>}
+                    <span className="bg-gradient-to-r from-slate-500 via-slate-400 to-slate-500 bg-clip-text text-transparent">{base}</span>
+                    {base && live ? '\n\n' : null}
                     <span className="bg-gradient-to-r from-blue-400 via-indigo-300 to-purple-400 bg-clip-text text-transparent">{live}</span>
                     {isRecording && live && (
                       <span className="inline-block w-2 h-6 ml-1 bg-indigo-400 animate-pulse align-middle" style={{ height: `${settings.fontSize * 0.7}px` }}></span>
