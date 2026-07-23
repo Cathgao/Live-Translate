@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Mic, Square, Loader2, AlertCircle, Volume2, VolumeX, RefreshCw, Download, Settings as SettingsIcon, X } from 'lucide-react';
-import { loadSettings, saveSettings, RANGES, vadLabel, DEFAULT_SETTINGS, loadTokenUsage, saveTokenUsage, clearTokenUsage } from './settings';
+import { Mic, Square, Loader2, AlertCircle, Volume2, VolumeX, RefreshCw, Download, Settings as SettingsIcon, X, Github } from 'lucide-react';
+import { loadSettings, saveSettings, RANGES, vadLabel, DEFAULT_SETTINGS, SOURCE_LANGUAGES, loadTokenUsage, saveTokenUsage, clearTokenUsage } from './settings';
 
 const PCM_MIME_TYPE = 'audio/pcm;rate=16000';
 const CHUNK_SAMPLES = 1600; // 100 ms @ 16 kHz
@@ -197,7 +197,6 @@ export default function App() {
   const [isConnecting, setIsConnecting] = useState(false);
   const [isSpeaking, setIsSpeaking] = useState(false);
 
-  const [sourceLang, setSourceLang] = useState('Auto');
   const [targetLang, setTargetLang] = useState('Chinese (Simplified)');
 
   const [originalBase, setOriginalBase] = useState('');
@@ -210,6 +209,7 @@ export default function App() {
   const [autoPlayAudio, setAutoPlayAudio] = useState(false); // OFF by default
 
   const [settings, setSettings] = useState(() => loadSettings());
+  const sourceLang = settings.sourceLang;
   const [showSettings, setShowSettings] = useState(false);
 
   const [tokenUsage, setTokenUsageState] = useState(() => loadTokenUsage());
@@ -233,17 +233,13 @@ export default function App() {
   const pendingOrigRef = useRef<string>('');
   const pendingTransRef = useRef<string>('');
   const segmentCommitTimer = useRef<NodeJS.Timeout | null>(null);
-  // 计时器只会在收到"有实际文本增量"的 transcription chunk 时被重置
-  // (见 ws.onmessage 的 if (origDelta || transDelta) 分支)。
-  // 所以当一句话说完、长时间没有新文本,5 秒后就会自动 commit 当前缓冲,
-  // 下一句追加到新行,不等模型发 transcription_finished。
   const SEGMENT_COMMIT_MS = 5000;
 
   const scrollRefTop = useRef<HTMLDivElement>(null);
   const scrollRefBottom = useRef<HTMLDivElement>(null);
   const volumeBarsRef = useRef<(HTMLDivElement | null)[]>([]);
 
-  const LANGUAGES = ['Auto', 'English', 'Chinese (Simplified)', 'Spanish', 'French', 'Japanese', 'Korean', 'German'];
+  const LANGUAGES = SOURCE_LANGUAGES;
 
   useEffect(() => {
     const el = scrollRefTop.current;
@@ -571,18 +567,8 @@ export default function App() {
         </div>
 
         <div className="flex items-center gap-3 md:gap-4">
-          {/* Language Selector */}
+          {/* Target Language Selector */}
           <div className="flex items-center gap-2 bg-slate-800/90 px-3 py-1.5 rounded-full border border-slate-700 shadow-md text-xs md:text-sm">
-            <select
-              value={sourceLang}
-              onChange={(e) => setSourceLang(e.target.value)}
-              disabled={isRecording || isConnecting}
-              className="bg-transparent font-medium focus:outline-none cursor-pointer text-slate-100 disabled:opacity-50 appearance-none"
-              title="源语言(自动检测或指定)"
-            >
-              {LANGUAGES.map(lang => <option key={lang} value={lang} className="bg-slate-800 text-slate-100">{lang}</option>)}
-            </select>
-            <span className="text-slate-500">→</span>
             <select
               value={targetLang}
               onChange={(e) => setTargetLang(e.target.value)}
@@ -593,6 +579,18 @@ export default function App() {
               {LANGUAGES.filter(l => l !== 'Auto').map(lang => <option key={lang} value={lang} className="bg-slate-800 text-slate-100">{lang}</option>)}
             </select>
           </div>
+
+          {/* GitHub link */}
+          <a
+            href="https://github.com/Cathgao/Live-Translate"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="relative w-9 h-9 rounded-full border flex items-center justify-center transition-colors bg-slate-800/90 hover:bg-slate-700 border-slate-700 text-slate-300 hover:text-white"
+            title="GitHub 仓库"
+            aria-label="GitHub 仓库"
+          >
+            <Github className="w-4 h-4" />
+          </a>
 
           {/* Settings (gear) */}
           <button
@@ -661,6 +659,34 @@ export default function App() {
               </div>
               <p className="text-[11px] text-slate-500 mt-2 leading-relaxed">
                 服务端识别静音多久后判定一句话结束。在下次新建连接时生效。
+              </p>
+            </div>
+
+            {/* 源语言 */}
+            <div className="mb-5">
+              <div className="flex items-baseline justify-between mb-1.5">
+                <label className="text-sm font-semibold text-slate-200">
+                  源语言
+                </label>
+                <span className="text-[11px] text-slate-400">
+                  默认 <span className="text-blue-300 font-mono">Auto</span>(自动检测)
+                </span>
+              </div>
+              <select
+                value={settings.sourceLang}
+                onChange={(e) => updateSettings({ sourceLang: e.target.value })}
+                disabled={isRecording || isConnecting}
+                className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-100 focus:outline-none focus:border-blue-500 cursor-pointer disabled:opacity-50"
+                title="源语言(Auto 表示由 Gemini 自动检测)"
+              >
+                {LANGUAGES.map(lang => (
+                  <option key={lang} value={lang} className="bg-slate-900 text-slate-100">
+                    {lang === 'Auto' ? `${lang} (自动检测)` : lang}
+                  </option>
+                ))}
+              </select>
+              <p className="text-[11px] text-slate-500 mt-2 leading-relaxed">
+                指定说话语言或交给模型自动判断。在下次新建连接时生效。
               </p>
             </div>
 
@@ -863,20 +889,7 @@ export default function App() {
             </div>
           </div>
 
-          {/* Audio Visualizer Bars */}
-          {isRecording && (
-            <div className="absolute bottom-4 right-8 flex items-center gap-3 bg-slate-950/80 px-4 py-2 rounded-full border border-slate-800 backdrop-blur">
-              <span className="text-xs text-blue-400 font-medium">麦克风已激活</span>
-              <div className="flex items-end gap-1 h-5">
-                <div ref={el => volumeBarsRef.current[0] = el} className="w-1 bg-blue-500 rounded-full h-2 transition-all duration-75"></div>
-                <div ref={el => volumeBarsRef.current[1] = el} className="w-1 bg-blue-400 rounded-full h-4 transition-all duration-75"></div>
-                <div ref={el => volumeBarsRef.current[2] = el} className="w-1 bg-blue-300 rounded-full h-5 transition-all duration-75"></div>
-                <div ref={el => volumeBarsRef.current[3] = el} className="w-1 bg-blue-400 rounded-full h-3 transition-all duration-75"></div>
-                <div ref={el => volumeBarsRef.current[4] = el} className="w-1 bg-blue-500 rounded-full h-4 transition-all duration-75"></div>
-              </div>
-            </div>
-          )}
-        </section>
+          </section>
 
         {/* Bottom Half: Translated Text — accumulating turns */}
         <section className="flex-1 bg-slate-950 p-6 md:p-10 relative flex flex-col min-h-0">
@@ -893,7 +906,7 @@ export default function App() {
               {(translatedBase || translatedLive) && (
                 <button
                   onClick={handleSpeakTranslatedText}
-                  className={`flex items-center gap-2 px-3.5 py-1.5 rounded-full text-xs font-semibold transition-all shadow-md ${
+                  className={`flex items-center gap-2 sm:px-3.5 p-2 sm:py-1.5 rounded-full text-xs font-semibold transition-all shadow-md ${
                     isSpeaking
                       ? 'bg-emerald-600 text-white animate-pulse'
                       : 'bg-emerald-950/90 text-emerald-300 hover:bg-emerald-900 border border-emerald-800'
@@ -903,12 +916,12 @@ export default function App() {
                   {isSpeaking ? (
                     <>
                       <VolumeX className="w-4 h-4" />
-                      <span>停止朗读</span>
+                      <span className="hidden sm:inline">停止朗读</span>
                     </>
                   ) : (
                     <>
                       <Volume2 className="w-4 h-4 text-emerald-400" />
-                      <span>朗读翻译</span>
+                      <span className="hidden sm:inline">朗读翻译</span>
                     </>
                   )}
                 </button>
@@ -952,53 +965,83 @@ export default function App() {
       </main>
 
       {/* Control Bar */}
-      <footer className="h-24 bg-slate-900 border-t border-slate-800 flex items-center justify-between px-8 md:px-16 shrink-0 relative">
-        <div className="flex-1"></div>
+      <footer className="min-h-24 h-auto py-3 bg-slate-900 border-t border-slate-800 flex items-center justify-between flex-wrap gap-y-3 px-4 sm:px-8 md:px-16 shrink-0 relative">
+        <div className="hidden sm:block flex-1"></div>
 
-        {/* Center Mic Button */}
+        {/* Center Mic Button + Audio Visualizer + Token counter */}
         <div className="flex items-center gap-3">
           <button
             onClick={toggleRecording}
             disabled={isConnecting}
-            className={`w-20 h-20 -mt-10 rounded-full ${isRecording ? 'bg-red-600 hover:bg-red-500 shadow-[0_0_35px_rgba(220,38,38,0.5)]' : 'bg-blue-600 hover:bg-blue-500 shadow-[0_0_35px_rgba(37,99,235,0.5)]'} flex items-center justify-center border-4 border-slate-950 transition-all active:scale-95 disabled:opacity-50 z-10`}
+            className={`w-16 h-16 sm:w-20 sm:h-20 sm:-mt-10 rounded-full ${isRecording ? 'bg-red-600 hover:bg-red-500 shadow-[0_0_35px_rgba(220,38,38,0.5)]' : 'bg-blue-600 hover:bg-blue-500 shadow-[0_0_35px_rgba(37,99,235,0.5)]'} flex items-center justify-center border-4 border-slate-950 transition-all active:scale-95 disabled:opacity-50 z-10`}
             title={isRecording ? '点击停止录音' : '点击开始实时语音翻译'}
           >
             {isConnecting ? (
-              <Loader2 className="w-8 h-8 text-white animate-spin" />
+              <Loader2 className="w-6 h-6 sm:w-8 sm:h-8 text-white animate-spin" />
             ) : isRecording ? (
-              <Square className="w-7 h-7 text-white fill-current" />
+              <Square className="w-5 h-5 sm:w-7 sm:h-7 text-white fill-current" />
             ) : (
-              <Mic className="w-8 h-8 text-white" />
+              <Mic className="w-6 h-6 sm:w-8 sm:h-8 text-white" />
             )}
           </button>
 
-          {/* Token 计数 — 仅在录音中显示,停止后保留最后一次值 */}
-          {(isRecording || isConnecting || tokenUsage.input > 0 || tokenUsage.output > 0) && (
+          <div className="flex flex-col items-start gap-1.5">
             <div
-              className={`flex items-center gap-2 px-3 py-1.5 rounded-full border text-[11px] font-mono shadow-sm backdrop-blur transition-colors ${
-                isRecording || isConnecting
-                  ? 'bg-slate-950/90 border-slate-700 text-slate-300'
-                  : 'bg-slate-900 border-slate-800 text-slate-500'
+              className={`flex items-center gap-2 px-3 py-1.5 rounded-full border backdrop-blur transition-colors ${
+                isRecording
+                  ? 'bg-slate-950/80 border-slate-800'
+                  : 'bg-red-950/40 border-red-900/60'
               }`}
-              title="本次会话累计消耗的 token(来自服务端 usageMetadata)"
             >
-              <span className="text-slate-500">Tokens</span>
-              <span className="text-slate-400">入</span>
-              <span className="text-blue-300 font-semibold min-w-[2.5rem] text-right">
-                {formatTokens(tokenUsage.input)}
-              </span>
-              <span className="text-slate-600">|</span>
-              <span className="text-slate-400">出</span>
-              <span className="text-emerald-300 font-semibold min-w-[2.5rem] text-right">
-                {formatTokens(tokenUsage.output)}
-              </span>
-              <span className="text-slate-600">|</span>
-              <span className="text-slate-400">合</span>
-              <span className="text-white font-semibold min-w-[2.5rem] text-right">
-                {formatTokens(tokenUsage.input + tokenUsage.output)}
-              </span>
+              {isRecording ? (
+                <>
+                  <span className="text-[11px] text-blue-400 font-medium">麦克风已激活</span>
+                  <div className="flex items-end gap-1 h-4">
+                    <div ref={el => volumeBarsRef.current[0] = el} className="w-1 bg-blue-500 rounded-full h-2 transition-all duration-75"></div>
+                    <div ref={el => volumeBarsRef.current[1] = el} className="w-1 bg-blue-400 rounded-full h-3 transition-all duration-75"></div>
+                    <div ref={el => volumeBarsRef.current[2] = el} className="w-1 bg-blue-300 rounded-full h-4 transition-all duration-75"></div>
+                    <div ref={el => volumeBarsRef.current[3] = el} className="w-1 bg-blue-400 rounded-full h-2 transition-all duration-75"></div>
+                    <div ref={el => volumeBarsRef.current[4] = el} className="w-1 bg-blue-500 rounded-full h-3 transition-all duration-75"></div>
+                  </div>
+                </>
+              ) : (
+                <>
+                  <span className="text-[11px] text-red-400 font-medium">麦克风已关闭</span>
+                  <div className="flex items-center h-4">
+                    <div className="w-6 h-0.5 bg-red-500 rounded-full"></div>
+                  </div>
+                </>
+              )}
             </div>
-          )}
+
+            {/* Token 计数 — 仅在录音中显示,停止后保留最后一次值 */}
+            {(isRecording || isConnecting || tokenUsage.input > 0 || tokenUsage.output > 0) && (
+              <div
+                className={`flex items-center gap-2 px-3 py-1.5 rounded-full border text-[11px] font-mono shadow-sm backdrop-blur transition-colors ${
+                  isRecording || isConnecting
+                    ? 'bg-slate-950/90 border-slate-700 text-slate-300'
+                    : 'bg-slate-900 border-slate-800 text-slate-500'
+                }`}
+                title="本次会话累计消耗的 token(来自服务端 usageMetadata)"
+              >
+                <span className="text-slate-500">Tokens</span>
+                <span className="text-slate-400">入</span>
+                <span className="text-blue-300 font-semibold tabular-nums">
+                  {formatTokens(tokenUsage.input)}
+                </span>
+                <span className="text-slate-600">|</span>
+                <span className="text-slate-400">出</span>
+                <span className="text-emerald-300 font-semibold tabular-nums">
+                  {formatTokens(tokenUsage.output)}
+                </span>
+                <span className="text-slate-600">|</span>
+                <span className="text-slate-400">合</span>
+                <span className="text-white font-semibold tabular-nums">
+                  {formatTokens(tokenUsage.input + tokenUsage.output)}
+                </span>
+              </div>
+            )}
+          </div>
         </div>
 
         {/* Right Action buttons */}
@@ -1010,7 +1053,7 @@ export default function App() {
               translationPlayerRef.current?.setMuted(!next);
             }}
             title="切换翻译语音自动播放"
-            className={`flex items-center gap-1.5 text-xs px-3.5 py-2 rounded-lg border transition-colors ${
+            className={`flex items-center gap-1.5 text-xs sm:px-3.5 p-2 sm:py-2 rounded-lg border transition-colors ${
               autoPlayAudio
                 ? 'text-indigo-300 bg-indigo-950/60 hover:bg-indigo-900/70 border-indigo-800/80'
                 : 'text-slate-400 hover:text-slate-200 bg-slate-800 hover:bg-slate-700 border-slate-700'
@@ -1021,15 +1064,15 @@ export default function App() {
             ) : (
               <VolumeX className="w-3.5 h-3.5" />
             )}
-            <span>翻译语音自动播 · {autoPlayAudio ? '开' : '关'}</span>
+            <span className="hidden sm:inline">翻译语音自动播 · {autoPlayAudio ? '开' : '关'}</span>
           </button>
           <button
             onClick={handleSaveTranscript}
-            className="flex items-center gap-1.5 text-xs text-emerald-300 hover:text-white bg-emerald-950/60 hover:bg-emerald-800 px-3.5 py-2 rounded-lg border border-emerald-800 transition-colors"
+            className="flex items-center gap-1.5 text-xs text-emerald-300 hover:text-white bg-emerald-950/60 hover:bg-emerald-800 sm:px-3.5 p-2 sm:py-2 rounded-lg border border-emerald-800 transition-colors"
             title="把当前累积的原文与译文保存为本地 .txt 文件"
           >
             <Download className="w-3.5 h-3.5" />
-            <span>保存</span>
+            <span className="hidden sm:inline">保存</span>
           </button>
           <button
             onClick={() => {
@@ -1039,7 +1082,6 @@ export default function App() {
               setTranslatedLive('');
               pendingOrigRef.current = '';
               pendingTransRef.current = '';
-              // 注意:不重置 tokenUsage —— 它跨会话累计。
               if (segmentCommitTimer.current) {
                 clearTimeout(segmentCommitTimer.current);
                 segmentCommitTimer.current = null;
@@ -1047,11 +1089,11 @@ export default function App() {
               if (isSpeaking) window.speechSynthesis.cancel();
               setIsSpeaking(false);
             }}
-            className="flex items-center gap-1.5 text-xs text-slate-400 hover:text-slate-200 bg-slate-800 hover:bg-slate-700 px-3.5 py-2 rounded-lg border border-slate-700 transition-colors"
+            className="flex items-center gap-1.5 text-xs text-slate-400 hover:text-slate-200 bg-slate-800 hover:bg-slate-700 sm:px-3.5 p-2 sm:py-2 rounded-lg border border-slate-700 transition-colors"
             title="清空已显示的转写/翻译"
           >
             <RefreshCw className="w-3.5 h-3.5" />
-            <span>清空</span>
+            <span className="hidden sm:inline">清空</span>
           </button>
         </div>
       </footer>

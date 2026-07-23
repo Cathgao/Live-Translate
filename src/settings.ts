@@ -1,15 +1,8 @@
-// 本地用户设置的持久化。
-// 目前包含:
-//   - silenceMs: 服务端 VAD 静默阈值(毫秒)。下次新建 Gemini Live 连接时生效。
-//   - fontSize: 转写面板字号(像素)。实时生效。
-//   - tokenUsage: 累计 token 计数(input / output)。跨会话保留,
-//     刷新或关闭页面时不清零,直到用户主动清除或清掉 localStorage。
-//
-// 持久化键使用版本后缀,以后字段名变更时可方便做迁移。
 
 export type Settings = {
   silenceMs: number;
   fontSize: number;
+  sourceLang: string;
 };
 
 export type TokenUsage = {
@@ -19,13 +12,11 @@ export type TokenUsage = {
 
 const STORAGE_KEY = 'live-translate.settings.v1';
 const TOKEN_STORAGE_KEY = 'live-translate.token-usage.v1';
-
-// 默认值参考官方文档:
-//   * silenceMs = 600 —— "balanced"档位,适合多数口语。
-//   * fontSize = 25 —— 紧凑默认值,适合长段转写。
+export const SOURCE_LANGUAGES = ['Auto', 'English', 'Chinese (Simplified)', 'Spanish', 'French', 'Japanese', 'Korean', 'German'];
 export const DEFAULT_SETTINGS: Settings = {
   silenceMs: 600,
   fontSize: 25,
+  sourceLang: 'Auto',
 };
 
 export const DEFAULT_TOKEN_USAGE: TokenUsage = {
@@ -49,6 +40,9 @@ export function loadSettings(): Settings {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return { ...DEFAULT_SETTINGS };
     const parsed = JSON.parse(raw);
+    const lang = typeof parsed?.sourceLang === 'string' && SOURCE_LANGUAGES.includes(parsed.sourceLang)
+      ? parsed.sourceLang
+      : DEFAULT_SETTINGS.sourceLang;
     return {
       silenceMs: clamp(
         Number(parsed?.silenceMs),
@@ -60,9 +54,9 @@ export function loadSettings(): Settings {
         RANGES.fontSize.min,
         RANGES.fontSize.max,
       ),
+      sourceLang: lang,
     };
   } catch {
-    // localStorage 不可用 / JSON 损坏 —— 回退默认。
     return { ...DEFAULT_SETTINGS };
   }
 }
@@ -71,7 +65,6 @@ export function saveSettings(s: Settings): void {
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(s));
   } catch {
-    // 隐私模式 / 配额超限 —— 静默失败,设置仅本次会话生效。
   }
 }
 
@@ -93,7 +86,6 @@ export function saveTokenUsage(u: TokenUsage): void {
   try {
     localStorage.setItem(TOKEN_STORAGE_KEY, JSON.stringify(u));
   } catch {
-    // 同 saveSettings。
   }
 }
 
@@ -101,11 +93,9 @@ export function clearTokenUsage(): void {
   try {
     localStorage.removeItem(TOKEN_STORAGE_KEY);
   } catch {
-    // 同上。
   }
 }
 
-// 给 slider 用的"VAD 档位"提示
 export function vadLabel(ms: number): string {
   if (ms <= 250) return '灵敏(可能切碎句子)';
   if (ms <= 900) return '平衡(推荐)';
