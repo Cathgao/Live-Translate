@@ -1,14 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Mic, Square, Loader2, Globe2, AlertCircle, Volume2, VolumeX, RefreshCw, Download, Settings as SettingsIcon, X } from 'lucide-react';
+import { Mic, Square, Loader2, AlertCircle, Volume2, VolumeX, RefreshCw, Download, Settings as SettingsIcon, X } from 'lucide-react';
 import { loadSettings, saveSettings, RANGES, vadLabel, DEFAULT_SETTINGS, loadTokenUsage, saveTokenUsage, clearTokenUsage } from './settings';
 
-// --- Robust Audio Recorder using AudioWorklet (PCM 16 kHz, raw 16-bit LE, mono) ---
-// Per Gemini Live API spec, the wire format must be raw PCM (audio/pcm;rate=16000),
-// not the compressed webm/opus that MediaRecorder produces.
-//
-// Note: there is NO client-side VAD/silence threshold. Gemini's Live Translate model
-// detects pauses and segments on its own — the SDK exposes no such knob. We stream
-// continuously.
 const PCM_MIME_TYPE = 'audio/pcm;rate=16000';
 const CHUNK_SAMPLES = 1600; // 100 ms @ 16 kHz
 
@@ -17,8 +10,6 @@ class AudioRecorderManager {
   private audioContext: AudioContext | null = null;
   private workletNode: AudioWorkletNode | null = null;
   private sourceNode: MediaStreamAudioSourceNode | null = null;
-  // Accumulator: leftover Int16 samples (less than CHUNK_SAMPLES) carry over to
-  // the next emission. This keeps the timeline continuous with no per-frame gaps.
   private sampleAcc: Int16Array = new Int16Array(0);
 
   private onChunkCallback: ((base64: string, mimeType: string) => void) | null = null;
@@ -33,7 +24,6 @@ class AudioRecorderManager {
     this.onVolumeCallback = onVolume ?? null;
     this.sampleAcc = new Int16Array(0);
 
-    // 1. Request microphone
     console.log('[mic] requesting getUserMedia...');
     this.stream = await navigator.mediaDevices.getUserMedia({
       audio: {
@@ -45,14 +35,12 @@ class AudioRecorderManager {
     });
     console.log('[mic] OK, tracks=', this.stream.getTracks().map(t => t.kind + ':' + t.readyState).join(','));
 
-    // 2. AudioContext at 16 kHz so output is already in target rate.
     const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
     this.audioContext = new AudioCtx({ sampleRate: 16000 });
     if (this.audioContext.state === 'suspended') {
       await this.audioContext.resume();
     }
 
-    // 3. Load worklet module. Lives in /public so Vite serves it raw.
     await this.audioContext.audioWorklet.addModule('/pcm-worklet.js');
 
     this.sourceNode = this.audioContext.createMediaStreamSource(this.stream);
@@ -68,18 +56,15 @@ class AudioRecorderManager {
       }
     };
 
-    // Don't connect to destination — we only want the worklet to observe.
     this.sourceNode.connect(this.workletNode);
     console.log('[mic] started streaming — every 1600 samples will be sent on the wire');
   }
 
   private handlePcm(incoming: Int16Array) {
-    // Merge leftover + incoming
     const merged = new Int16Array(this.sampleAcc.length + incoming.length);
     merged.set(this.sampleAcc, 0);
     merged.set(incoming, this.sampleAcc.length);
 
-    // Emit as many full CHUNK_SAMPLES windows as possible.
     let offset = 0;
     let emitted = 0;
     while (merged.length - offset >= CHUNK_SAMPLES) {
@@ -96,10 +81,8 @@ class AudioRecorderManager {
       emitted++;
     }
 
-    // Save leftover (< CHUNK_SAMPLES) for the next round.
     this.sampleAcc = merged.subarray(offset);
 
-    // Throttled log: once every 2s for liveness check.
     if (emitted > 0) {
       const now = Date.now();
       if (!this.lastLogTime || now - this.lastLogTime > 2000) {
@@ -141,7 +124,6 @@ function arrayBufferToBase64(buffer: ArrayBuffer): string {
   return btoa(binary);
 }
 
-// --- Translation audio player (24 kHz PCM, base64) ---
 class TranslationAudioPlayer {
   private audioContext: AudioContext | null = null;
   private nextStartTime: number = 0;
@@ -204,7 +186,6 @@ class TranslationAudioPlayer {
   }
 }
 
-// 格式化 token 数:< 1000 显示整数,>= 1000 显示 1 位小数 + 'k'。
 function formatTokens(n: number): string {
   if (!Number.isFinite(n) || n < 0) return '0';
   if (n < 1000) return String(Math.round(n));
@@ -216,16 +197,9 @@ export default function App() {
   const [isConnecting, setIsConnecting] = useState(false);
   const [isSpeaking, setIsSpeaking] = useState(false);
 
-  // Languages are display names in English (we serve as labels); UI chrome is Chinese.
   const [sourceLang, setSourceLang] = useState('Auto');
   const [targetLang, setTargetLang] = useState('Chinese (Simplified)');
 
-  // Transcription state. The UI renders ONE continuous transcript per
-  // language, like Google AI Studio's "Input transcript / Output transcript"
-  // boxes. Internally we keep:
-  //   * base  — text of all finalized utterances (committed on turnComplete).
-  //   * live  — text of the in-progress utterance, growing frame by frame.
-  // Display = (base ? base + '\n\n' : '') + live.
   const [originalBase, setOriginalBase] = useState('');
   const [translatedBase, setTranslatedBase] = useState('');
   const [originalLive, setOriginalLive] = useState('');
@@ -235,20 +209,15 @@ export default function App() {
   const [showSysPermissionGuide, setShowSysPermissionGuide] = useState(false);
   const [autoPlayAudio, setAutoPlayAudio] = useState(false); // OFF by default
 
-  // 用户设置(齿轮面板)。从 localStorage 读取,改一次写一次。初始化用 lazy
-  // initializer 只读一次,避免每次渲染都打 localStorage。
   const [settings, setSettings] = useState(() => loadSettings());
   const [showSettings, setShowSettings] = useState(false);
 
-  // 累计 token 消耗。由服务端从 usageMetadata 周期性下发累加而来。
-  // 跨会话保留 —— 用户主动清除或清掉 localStorage 才重置。
   const [tokenUsage, setTokenUsageState] = useState(() => loadTokenUsage());
   const setTokenUsage = (u: { input: number; output: number }) => {
     setTokenUsageState(u);
     saveTokenUsage(u);
   };
 
-  // 设置项更新:同步写 localStorage。
   const updateSettings = (patch: Partial<typeof settings>) => {
     setSettings((prev) => {
       const next = { ...prev, ...patch };
@@ -261,16 +230,8 @@ export default function App() {
   const audioRecorderRef = useRef<AudioRecorderManager | null>(null);
   const translationPlayerRef = useRef<TranslationAudioPlayer | null>(null);
 
-  // 服务端每次转写帧都把原文/译文的 *增量文本* 追加到这两个 pending buffer;
-  // 收到 transcription_finished 时 (即 serverContent.turnComplete) 再把它们
-  // 落到 base,并清空。这和官方 LiveKit 参考实现 (translation-bridge.ts
-  // handleGeminiMessage) 完全一致 —— 不在客户端做任何前缀匹配/相似度计算。
   const pendingOrigRef = useRef<string>('');
   const pendingTransRef = useRef<string>('');
-
-  // 兜底计时器:模型可能因网络抖动漏发 turnComplete,这种情况下如果 ~1.5 s
-  // 没有新转写帧,我们也把 pending 冲刷到 base。这是一个 fallback,主路径
-  // 是服务端的 turnComplete 信号。
   const segmentCommitTimer = useRef<NodeJS.Timeout | null>(null);
   const SEGMENT_COMMIT_MS = 1500;
 
@@ -280,11 +241,6 @@ export default function App() {
 
   const LANGUAGES = ['Auto', 'English', 'Chinese (Simplified)', 'Spanish', 'French', 'Japanese', 'Korean', 'German'];
 
-  // Auto scroll to the bottom whenever the transcript grows. We schedule the
-  // scroll on the next animation frame so the DOM has time to apply the new
-  // state (React's commit → paint happens after rAF). Without this, the very
-  // first scroll often reads the stale scrollHeight and the new line stays
-  // clipped behind the section above.
   useEffect(() => {
     const el = scrollRefTop.current;
     if (!el) return;
@@ -314,19 +270,15 @@ export default function App() {
   const startRecording = async () => {
     setError('');
     setIsConnecting(true);
-    // Only clear the in-progress live text — keep the already-saved base so
-    // users can resume a session without losing earlier context.
     setOriginalLive('');
     setTranslatedLive('');
     pendingOrigRef.current = '';
     pendingTransRef.current = '';
-    // 注意:不重置 tokenUsage —— 它是跨会话累计的,刷新 / 关闭页面才清除。
     if (segmentCommitTimer.current) {
       clearTimeout(segmentCommitTimer.current);
       segmentCommitTimer.current = null;
     }
 
-    // 1. Connect WebSocket to backend Live Translation Stream.
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const wsUrl = `${protocol}//${window.location.host}/live?source=${encodeURIComponent(sourceLang)}&target=${encodeURIComponent(targetLang)}&silenceMs=${encodeURIComponent(String(settings.silenceMs))}`;
 
@@ -343,12 +295,10 @@ export default function App() {
     ws.onopen = async () => {
       console.log('[ws] connected to live translation server');
 
-      // Audio player with the user's auto-play pref.
       const player = new TranslationAudioPlayer();
       player.setMuted(!autoPlayAudio);
       translationPlayerRef.current = player;
 
-      // 2. Start mic via AudioRecorderManager.
       try {
         const recorder = new AudioRecorderManager();
         audioRecorderRef.current = recorder;
@@ -397,9 +347,6 @@ export default function App() {
           console.log('[ws recv]', kind, Object.keys(msg).join(','));
         }
 
-        // 把当前 pending buffer 落到 base,并清空 live。
-        // 这是断句的唯一提交点 —— 由服务端 transcription_finished 触发,
-        // 或兜底计时器触发。
         const flushPending = () => {
           const finalOrig = pendingOrigRef.current.trim();
           const finalTrans = pendingTransRef.current.trim();
@@ -419,7 +366,6 @@ export default function App() {
           }
         };
 
-        // 推延兜底计时器。每次有新 chunk 都重置;到时间没新 chunk 就 flush。
         const armSilenceCommit = () => {
           if (segmentCommitTimer.current) clearTimeout(segmentCommitTimer.current);
           segmentCommitTimer.current = setTimeout(() => {
@@ -429,8 +375,6 @@ export default function App() {
         };
 
         if (msg.type === 'transcription') {
-          // 服务端 (server.ts) 把每个 input/outputTranscription chunk 原样转发
-          // 过来。原文追加到 pendingOrig,译文追加到 pendingTrans。
           const origDelta = msg.originalText || '';
           const transDelta = msg.translatedText || '';
           if (origDelta) {
@@ -452,14 +396,11 @@ export default function App() {
         }
 
         if (msg.type === 'transcription_finished') {
-          // 服务端在 serverContent.turnComplete 时发来的 —— 这是真正的
-          // "一句结束"信号。立刻 flush。
           flushPending();
           return;
         }
 
         if (msg.type === 'transcription_interrupted') {
-          // 模型被用户/上下文打断 —— 清空 pending,等待下一句。
           pendingOrigRef.current = '';
           pendingTransRef.current = '';
           setOriginalLive('');
@@ -532,8 +473,6 @@ export default function App() {
     }
   };
 
-  // TTS for the latest translated text on demand. Prefer the live (in-progress)
-  // text — it has the most recent content — but fall back to base.
   const handleSpeakTranslatedText = () => {
     const last = (translatedLive || translatedBase).trim();
     if (!last) return;
@@ -570,8 +509,6 @@ export default function App() {
     window.speechSynthesis.speak(utterance);
   };
 
-  // Save the accumulated transcript to a local .txt file. Includes both
-  // the finalized base and the in-progress live text.
   const handleSaveTranscript = () => {
     const origFull = (originalBase + (originalLive ? (originalBase ? ' ' : '') + originalLive : '')).trim();
     const transFull = (translatedBase + (translatedLive ? (translatedBase ? ' ' : '') + translatedLive : '')).trim();
@@ -612,12 +549,13 @@ export default function App() {
 
   return (
     <div className="w-full h-full bg-slate-950 flex flex-col font-sans text-slate-100 overflow-hidden">
-      {/* Header Navigation */}
       <nav className="h-16 flex items-center justify-between px-6 md:px-8 bg-slate-900/80 border-b border-slate-800 shrink-0 backdrop-blur">
         <div className="flex items-center gap-3">
-          <div className="w-8 h-8 rounded-lg bg-gradient-to-tr from-blue-500 via-indigo-500 to-purple-500 flex items-center justify-center shadow-md">
-            <Globe2 className="w-5 h-5 text-white" />
-          </div>
+          <img
+            src="/translation.png"
+            alt="translation logo"
+            className="w-8 h-8 rounded-lg object-cover shadow-md"
+          />
           <span className="font-bold text-base md:text-lg tracking-tight">Gemini 实时同传</span>
         </div>
 
