@@ -100,33 +100,43 @@ class PCMSenderProcessor extends AudioWorkletProcessor {
 
   process(inputs) {
     if (this.stopped) return false;
-    const input = inputs[0];
-    if (!input || input.length === 0) return true;
+    try {
+      const input = inputs[0];
+      if (!input || input.length === 0) return true;
 
-    // Use channel 0 (mono).
-    const samples = input[0];
+      // Use channel 0 (mono).
+      const samples = input[0];
+      if (!samples || samples.length === 0) return true;
 
-    // Compute RMS for this render slice (128 frames @ 48k ≈ 2.7ms).
-    let sumSq = 0;
-    for (let i = 0; i < samples.length; i++) {
-      sumSq += samples[i] * samples[i];
-    }
-    const rms = Math.sqrt(sumSq / samples.length);
-    this.rmsAccum += rms;
-    this.rmsCount += 1;
+      // Compute RMS for this render slice (128 frames @ 48k ≈ 2.7ms).
+      let sumSq = 0;
+      for (let i = 0; i < samples.length; i++) {
+        sumSq += samples[i] * samples[i];
+      }
+      const rms = Math.sqrt(sumSq / samples.length);
+      this.rmsAccum += rms;
+      this.rmsCount += 1;
 
-    // Resample to 16k, then enqueue into our chunked Int16 buffer.
-    const resampled = this.resample(samples);
-    this.appendSamples(resampled);
+      // Resample to 16k, then enqueue into our chunked Int16 buffer.
+      const resampled = this.resample(samples);
+      if (resampled && resampled.length > 0) {
+        this.appendSamples(resampled);
+      }
 
-    // Throttle volume messages to ~20 Hz.
-    const now = currentTime; // AudioWorkletGlobalScope time, in seconds
-    if (now - this.lastRmsPostTime > 0.05 && this.rmsCount > 0) {
-      const v = this.rmsAccum / this.rmsCount;
-      this.port.postMessage({ type: 'volume', value: Math.min(1, v) });
-      this.lastRmsPostTime = now;
-      this.rmsAccum = 0;
-      this.rmsCount = 0;
+      // Throttle volume messages to ~20 Hz.
+      const now = currentTime; // AudioWorkletGlobalScope time, in seconds
+      if (now < this.lastRmsPostTime) {
+        this.lastRmsPostTime = now;
+      }
+      if (now - this.lastRmsPostTime > 0.05 && this.rmsCount > 0) {
+        const v = this.rmsAccum / this.rmsCount;
+        this.port.postMessage({ type: 'volume', value: Math.min(1, v) });
+        this.lastRmsPostTime = now;
+        this.rmsAccum = 0;
+        this.rmsCount = 0;
+      }
+    } catch (e) {
+      // Catch any processing error so the worklet processor stays alive on Android
     }
 
     return true;

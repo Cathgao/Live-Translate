@@ -10,11 +10,14 @@ class AudioRecorderManager {
   private audioContext: AudioContext | null = null;
   private workletNode: AudioWorkletNode | null = null;
   private sourceNode: MediaStreamAudioSourceNode | null = null;
+  private dummyGainNode: GainNode | null = null;
   private sampleAcc: Int16Array = new Int16Array(0);
 
   private onChunkCallback: ((base64: string, mimeType: string) => void) | null = null;
   private onVolumeCallback: ((vol: number) => void) | null = null;
   private lastLogTime: number = 0;
+  private watchdogTimer: number | null = null;
+  private lastWorkletMsgTime: number = Date.now();
 
   async start(
     onChunkAvailable: (base64: string, mimeType: string) => void,
@@ -23,6 +26,7 @@ class AudioRecorderManager {
     this.onChunkCallback = onChunkAvailable;
     this.onVolumeCallback = onVolume ?? null;
     this.sampleAcc = new Int16Array(0);
+    this.lastWorkletMsgTime = Date.now();
 
     console.log('[mic] requesting getUserMedia...');
     this.stream = await navigator.mediaDevices.getUserMedia({
@@ -35,8 +39,30 @@ class AudioRecorderManager {
     });
     console.log('[mic] OK, tracks=', this.stream.getTracks().map(t => t.kind + ':' + t.readyState).join(','));
 
+    // Handle track mute/unmute events from Android OS/browser power management
+    const audioTrack = this.stream.getAudioTracks()[0];
+    if (audioTrack) {
+      audioTrack.onmute = () => {
+        console.warn('[mic track] OS/browser muted microphone track');
+      };
+      audioTrack.onunmute = () => {
+        console.log('[mic track] OS/browser unmuted microphone track');
+        this.resumeIfSuspended();
+      };
+      audioTrack.onended = () => {
+        console.warn('[mic track] microphone track ended');
+      };
+    }
+
     const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
     this.audioContext = new AudioCtx({ sampleRate: 16000 });
+
+    // Handle statechange (auto-resume if suspended by mobile OS or browser)
+    this.audioContext.onstatechange = () => {
+      console.log('[mic] AudioContext state changed:', this.audioContext?.state);
+      this.resumeIfSuspended();
+    };
+
     if (this.audioContext.state === 'suspended') {
       await this.audioContext.resume();
     }
@@ -46,7 +72,12 @@ class AudioRecorderManager {
     this.sourceNode = this.audioContext.createMediaStreamSource(this.stream);
     this.workletNode = new AudioWorkletNode(this.audioContext, 'pcm-sender-processor');
 
+    this.workletNode.onprocessorerror = (ev) => {
+      console.error('[mic worklet] processor error:', ev);
+    };
+
     this.workletNode.port.onmessage = (ev: MessageEvent) => {
+      this.lastWorkletMsgTime = Date.now();
       const msg = ev.data;
       if (!msg) return;
       if (msg.type === 'pcm') {
@@ -57,7 +88,69 @@ class AudioRecorderManager {
     };
 
     this.sourceNode.connect(this.workletNode);
-    console.log('[mic] started streaming — every 1600 samples will be sent on the wire');
+
+    // CRITICAL for Android / mobile browsers:
+    // Connect workletNode to AudioContext destination via a GainNode with gain=0.
+    // Without output connection to destination, Android Chrome optimizes the audio graph away
+    // and suspends rendering after a prolonged period of silence!
+    this.dummyGainNode = this.audioContext.createGain();
+    this.dummyGainNode.gain.value = 0;
+    this.workletNode.connect(this.dummyGainNode);
+    this.dummyGainNode.connect(this.audioContext.destination);
+
+    this.startWatchdog();
+
+    console.log('[mic] started streaming — worklet active, connected to destination via dummy gain');
+  }
+
+  public async resumeIfSuspended() {
+    if (
+      this.audioContext &&
+      (this.audioContext.state === 'suspended' || (this.audioContext as any).state === 'interrupted')
+    ) {
+      console.log('[mic] resuming suspended AudioContext...');
+      try {
+        await this.audioContext.resume();
+      } catch (e) {
+        console.warn('[mic] resume failed:', e);
+      }
+    }
+  }
+
+  private startWatchdog() {
+    this.stopWatchdog();
+    this.watchdogTimer = window.setInterval(async () => {
+      if (!this.audioContext) return;
+
+      if (
+        this.audioContext.state === 'suspended' ||
+        (this.audioContext as any).state === 'interrupted'
+      ) {
+        console.warn(`[mic watchdog] AudioContext is ${this.audioContext.state}, attempting resume...`);
+        await this.resumeIfSuspended();
+      }
+
+      // Check if worklet has stalled (no messages received for > 2.5s)
+      const silenceDuration = Date.now() - this.lastWorkletMsgTime;
+      if (silenceDuration > 2500) {
+        console.warn(`[mic watchdog] No worklet messages for ${silenceDuration}ms. Re-kicking AudioContext...`);
+        try {
+          if (this.audioContext.state === 'running') {
+            await this.audioContext.suspend();
+            await this.audioContext.resume();
+          } else {
+            await this.audioContext.resume();
+          }
+        } catch (_) {}
+      }
+    }, 1500);
+  }
+
+  private stopWatchdog() {
+    if (this.watchdogTimer !== null) {
+      clearInterval(this.watchdogTimer);
+      this.watchdogTimer = null;
+    }
   }
 
   private handlePcm(incoming: Int16Array) {
@@ -93,9 +186,13 @@ class AudioRecorderManager {
   }
 
   stop() {
+    this.stopWatchdog();
     if (this.workletNode) {
       try { this.workletNode.port.postMessage({ type: 'stop' }); } catch (_) {}
       try { this.workletNode.disconnect(); } catch (_) {}
+    }
+    if (this.dummyGainNode) {
+      try { this.dummyGainNode.disconnect(); } catch (_) {}
     }
     if (this.sourceNode) {
       try { this.sourceNode.disconnect(); } catch (_) {}
@@ -109,6 +206,7 @@ class AudioRecorderManager {
     this.stream = null;
     this.workletNode = null;
     this.sourceNode = null;
+    this.dummyGainNode = null;
     this.audioContext = null;
     this.sampleAcc = new Int16Array(0);
   }
@@ -235,6 +333,12 @@ export default function App() {
   const segmentCommitTimer = useRef<NodeJS.Timeout | null>(null);
   const SEGMENT_COMMIT_MS = 5000;
 
+  const [reconnectStatus, setReconnectStatus] = useState('');
+  const userStoppedRef = useRef(false);
+  const reconnectAttemptsRef = useRef(0);
+  const reconnectTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const MAX_RECONNECT_ATTEMPTS = 10;
+
   const scrollRefTop = useRef<HTMLDivElement>(null);
   const scrollRefBottom = useRef<HTMLDivElement>(null);
   const volumeBarsRef = useRef<(HTMLDivElement | null)[]>([]);
@@ -328,6 +432,9 @@ export default function App() {
 
   const startRecording = async () => {
     setError('');
+    setReconnectStatus('');
+    userStoppedRef.current = false;
+    reconnectAttemptsRef.current = 0;
     setIsConnecting(true);
     setOriginalLive('');
     setTranslatedLive('');
@@ -338,6 +445,10 @@ export default function App() {
       segmentCommitTimer.current = null;
     }
 
+    connectWebSocket();
+  };
+
+  const connectWebSocket = () => {
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const wsUrl = `${protocol}//${window.location.host}/live?source=${encodeURIComponent(sourceLang)}&target=${encodeURIComponent(targetLang)}&silenceMs=${encodeURIComponent(String(settings.silenceMs))}`;
 
@@ -353,54 +464,70 @@ export default function App() {
 
     ws.onopen = async () => {
       console.log('[ws] connected to live translation server');
+      reconnectAttemptsRef.current = 0;
+      setReconnectStatus('');
+      setError('');
 
-      const player = new TranslationAudioPlayer();
-      player.setMuted(!autoPlayAudio);
-      translationPlayerRef.current = player;
-
-      try {
-        const recorder = new AudioRecorderManager();
-        audioRecorderRef.current = recorder;
-
-        await recorder.start(
-          (base64Audio, mimeType) => {
-            if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-              wsRef.current.send(JSON.stringify({ audioBlob: base64Audio, mimeType }));
-            }
-          },
-          (vol) => {
-            volumeBarsRef.current.forEach((bar, idx) => {
-              if (bar) {
-                const multiplier = 1 + (idx % 3) * 0.4;
-                bar.style.height = `${Math.max(4, vol * 60 * multiplier)}px`;
-              }
-            });
-          },
-        );
-
-        setIsConnecting(false);
-        setIsRecording(true);
-      } catch (micErr: any) {
-        const errName = micErr?.name || 'Error';
-        const errMsg = micErr?.message || String(micErr);
-        console.warn('[mic] access issue:', errName, errMsg);
-
-        setIsConnecting(false);
-        if (errName === 'NotAllowedError' || errName === 'PermissionDeniedError' || errMsg.includes('Permission')) {
-          setError(`麦克风已被操作系统级隐私策略拒绝 (${errName}: ${errMsg})。即便浏览器网站权限开启，操作系统设置也会阻断麦克风。`);
-          setShowSysPermissionGuide(true);
-        } else if (errName === 'NotFoundError' || errName === 'DevicesNotFoundError') {
-          setError(`未找到麦克风设备 (${errName})。请检查设备或耳机麦克风连接。`);
-        } else {
-          setError(`麦克风启动失败 (${errName}: ${errMsg})。`);
-        }
-        stopRecording();
+      if (!translationPlayerRef.current) {
+        const player = new TranslationAudioPlayer();
+        player.setMuted(!autoPlayAudio);
+        translationPlayerRef.current = player;
       }
+
+      // If mic is already running (e.g. during auto-reconnect), don't re-initialize
+      if (!audioRecorderRef.current) {
+        try {
+          const recorder = new AudioRecorderManager();
+          audioRecorderRef.current = recorder;
+
+          await recorder.start(
+            (base64Audio, mimeType) => {
+              if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+                wsRef.current.send(JSON.stringify({ audioBlob: base64Audio, mimeType }));
+              }
+            },
+            (vol) => {
+              volumeBarsRef.current.forEach((bar, idx) => {
+                if (bar) {
+                  const multiplier = 1 + (idx % 3) * 0.4;
+                  bar.style.height = `${Math.max(4, vol * 60 * multiplier)}px`;
+                }
+              });
+            },
+          );
+        } catch (micErr: any) {
+          const errName = micErr?.name || 'Error';
+          const errMsg = micErr?.message || String(micErr);
+          console.warn('[mic] access issue:', errName, errMsg);
+
+          setIsConnecting(false);
+          if (errName === 'NotAllowedError' || errName === 'PermissionDeniedError' || errMsg.includes('Permission')) {
+            setError(`麦克风已被操作系统级隐私策略拒绝 (${errName}: ${errMsg})。`);
+            setShowSysPermissionGuide(true);
+          } else if (errName === 'NotFoundError' || errName === 'DevicesNotFoundError') {
+            setError(`未找到麦克风设备 (${errName})。`);
+          } else {
+            setError(`麦克风启动失败 (${errName}: ${errMsg})。`);
+          }
+          stopRecording();
+          return;
+        }
+      }
+
+      setIsConnecting(false);
+      setIsRecording(true);
     };
 
     ws.onmessage = (e) => {
       try {
         const msg = JSON.parse(e.data);
+        if (msg.type === 'ping') {
+          if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+            wsRef.current.send(JSON.stringify({ type: 'pong' }));
+          }
+          return;
+        }
+
         const kind = msg.type || (msg.error ? 'error' : 'unknown');
         if (kind !== 'transcription' && kind !== 'translation_audio' && kind !== 'transcription_finished') {
           console.log('[ws recv]', kind, Object.keys(msg).join(','));
@@ -500,25 +627,61 @@ export default function App() {
       }
     };
 
-    ws.onerror = () => {
-      setError('WebSocket 连接失败，请检查网络并重试');
-      stopRecording();
+    ws.onerror = (ev) => {
+      console.warn('[ws error event]:', ev);
     };
 
-    ws.onclose = () => {
-      stopRecording();
+    ws.onclose = (ev) => {
+      console.log(`[ws close] code=${ev.code}, userStopped=${userStoppedRef.current}`);
+      if (userStoppedRef.current) {
+        return;
+      }
+      handleAutoReconnect();
     };
   };
 
+  const handleAutoReconnect = () => {
+    if (userStoppedRef.current) return;
+
+    if (reconnectAttemptsRef.current >= MAX_RECONNECT_ATTEMPTS) {
+      setError('跨国网络连接中断且多次重连失败，请检查网络后重新开始');
+      setReconnectStatus('');
+      stopRecording();
+      return;
+    }
+
+    reconnectAttemptsRef.current += 1;
+    const attempt = reconnectAttemptsRef.current;
+    const delay = Math.min(1000 * Math.pow(1.3, attempt - 1), 5000);
+
+    setReconnectStatus(`网络线路闪断，正在自动重新连接 (${attempt}/${MAX_RECONNECT_ATTEMPTS})...`);
+    console.warn(`[ws reconnect] Network break. Scheduling reconnect #${attempt} in ${Math.round(delay)}ms`);
+
+    if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
+    reconnectTimerRef.current = setTimeout(() => {
+      if (!userStoppedRef.current) {
+        connectWebSocket();
+      }
+    }, delay);
+  };
+
   const stopRecording = () => {
+    userStoppedRef.current = true;
+    if (reconnectTimerRef.current) {
+      clearTimeout(reconnectTimerRef.current);
+      reconnectTimerRef.current = null;
+    }
+    setReconnectStatus('');
     setIsRecording(false);
     setIsConnecting(false);
 
     if (wsRef.current) {
-      if (wsRef.current.readyState === WebSocket.OPEN) {
-        wsRef.current.send(JSON.stringify({ action: 'flush' }));
-      }
-      wsRef.current.close();
+      try {
+        if (wsRef.current.readyState === WebSocket.OPEN) {
+          wsRef.current.send(JSON.stringify({ action: 'flush' }));
+        }
+        wsRef.current.close();
+      } catch (_) {}
       wsRef.current = null;
     }
 
@@ -782,7 +945,7 @@ export default function App() {
                 <div className="flex flex-col pr-2">
                   <span className="text-sm font-semibold text-slate-200 flex items-center gap-1.5">
                     <Sun className="w-4 h-4 text-amber-400" />
-                    屏幕常亮
+                    麦克风常亮防待机
                   </span>
                   <span className="text-[11px] text-slate-400 mt-0.5 leading-tight">
                     开启麦克风时阻止手机屏幕自动熄屏锁屏
@@ -794,7 +957,7 @@ export default function App() {
                   className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors cursor-pointer ${
                     settings.preventSleep ? 'bg-amber-500' : 'bg-slate-700'
                   }`}
-                  title="切换麦克风开启时屏幕常亮"
+                  title="切换麦克风开启时屏幕常亮防待机"
                 >
                   <span
                     className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
@@ -839,6 +1002,13 @@ export default function App() {
 
       {/* Main Container */}
       <main className="flex-1 flex flex-col h-0 relative">
+        {reconnectStatus && (
+          <div className="absolute top-4 left-1/2 -translate-x-1/2 z-50 bg-amber-950/95 text-amber-100 px-5 py-3 rounded-2xl shadow-2xl text-xs md:text-sm font-medium backdrop-blur-md flex items-center gap-3 max-w-xl border border-amber-500/80 animate-pulse">
+            <RefreshCw className="w-5 h-5 shrink-0 text-amber-400 animate-spin" />
+            <div className="flex-1 leading-relaxed">{reconnectStatus}</div>
+          </div>
+        )}
+
         {error && (
           <div className="absolute top-4 left-1/2 -translate-x-1/2 z-50 bg-red-900/95 text-white px-5 py-3.5 rounded-2xl shadow-2xl text-sm font-medium backdrop-blur-md flex items-center gap-3 max-w-2xl border border-red-500/80">
             <AlertCircle className="w-6 h-6 shrink-0 text-red-400" />

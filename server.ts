@@ -116,6 +116,21 @@ async function startServer() {
     let totalClientAudioBytes = 0;
     const sessionUsage = { input: 0, output: 0 };
 
+    // Periodic ping/pong heartbeat to keep client <-> server and server <-> Gemini connections active during long silences
+    const pingInterval = setInterval(() => {
+      if (clientWs.readyState === WebSocket.OPEN) {
+        try {
+          clientWs.ping();
+          safeSend(clientWs, { type: "ping" });
+        } catch (_) {}
+      }
+      if (liveWs && liveWs.readyState === WebSocket.OPEN && isLiveReady) {
+        try {
+          liveWs.ping();
+        } catch (_) {}
+      }
+    }, 15000);
+
     const apiKey = process.env.GEMINI_API_KEY;
     if (!apiKey) {
       safeSend(clientWs, {
@@ -284,6 +299,13 @@ async function startServer() {
         return;
       }
 
+      if (msg.type === "ping" || msg.type === "pong") {
+        if (msg.type === "ping") {
+          safeSend(clientWs, { type: "pong" });
+        }
+        return;
+      }
+
       if (typeof msg.audioBlob === "string" && msg.audioBlob.length > 0) {
         totalClientAudioBytes += Math.floor((msg.audioBlob.length * 3) / 4);
         if (!liveWs || liveWs.readyState !== WebSocket.OPEN || !isLiveReady) {
@@ -319,6 +341,7 @@ async function startServer() {
     clientWs.on("close", () => {
       clientAlive = false;
       clearTimeout(setupTimer);
+      clearInterval(pingInterval);
       if (liveWs && liveWs.readyState === WebSocket.OPEN) {
         try {
           liveWs.close();
