@@ -3,6 +3,7 @@ export type Settings = {
   silenceMs: number;
   fontSize: number;
   sourceLang: string;
+  preventSleep: boolean;
 };
 
 export type TokenUsage = {
@@ -17,6 +18,7 @@ export const DEFAULT_SETTINGS: Settings = {
   silenceMs: 1000,
   fontSize: 25,
   sourceLang: 'Auto',
+  preventSleep: true,
 };
 
 export const DEFAULT_TOKEN_USAGE: TokenUsage = {
@@ -55,6 +57,7 @@ export function loadSettings(): Settings {
         RANGES.fontSize.max,
       ),
       sourceLang: lang,
+      preventSleep: typeof parsed?.preventSleep === 'boolean' ? parsed.preventSleep : DEFAULT_SETTINGS.preventSleep,
     };
   } catch {
     return { ...DEFAULT_SETTINGS };

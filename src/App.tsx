@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Mic, Square, Loader2, AlertCircle, Volume2, VolumeX, RefreshCw, Download, Settings as SettingsIcon, X, Github } from 'lucide-react';
+import { Mic, Square, Loader2, AlertCircle, Volume2, VolumeX, RefreshCw, Download, Settings as SettingsIcon, X, Github, Sun } from 'lucide-react';
 import { loadSettings, saveSettings, RANGES, vadLabel, DEFAULT_SETTINGS, SOURCE_LANGUAGES, loadTokenUsage, saveTokenUsage, clearTokenUsage } from './settings';
 
 const PCM_MIME_TYPE = 'audio/pcm;rate=16000';
@@ -239,7 +239,65 @@ export default function App() {
   const scrollRefBottom = useRef<HTMLDivElement>(null);
   const volumeBarsRef = useRef<(HTMLDivElement | null)[]>([]);
 
+  const wakeLockSentinelRef = useRef<any>(null);
+  const [isKeepAwakeActive, setIsKeepAwakeActive] = useState(false);
+
+  const requestKeepAwake = async () => {
+    if (!settings.preventSleep) return;
+    try {
+      if ('wakeLock' in navigator) {
+        const sentinel = await (navigator as any).wakeLock.request('screen');
+        wakeLockSentinelRef.current = sentinel;
+        setIsKeepAwakeActive(true);
+        console.log('[wakeLock] Screen wake lock acquired via Screen Wake Lock API');
+        sentinel.addEventListener('release', () => {
+          console.log('[wakeLock] Screen wake lock released');
+          setIsKeepAwakeActive(false);
+          wakeLockSentinelRef.current = null;
+        });
+      }
+    } catch (err) {
+      console.warn('[wakeLock] navigator.wakeLock failed:', err);
+    }
+  };
+
+  const releaseKeepAwake = async () => {
+    if (wakeLockSentinelRef.current) {
+      try {
+        await wakeLockSentinelRef.current.release();
+      } catch (_) {}
+      wakeLockSentinelRef.current = null;
+    }
+    setIsKeepAwakeActive(false);
+  };
+
   const LANGUAGES = SOURCE_LANGUAGES;
+
+  useEffect(() => {
+    const handleVisibilityChange = async () => {
+      if (isRecording && settings.preventSleep && document.visibilityState === 'visible') {
+        if (!wakeLockSentinelRef.current) {
+          await requestKeepAwake();
+        }
+      }
+    };
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    };
+  }, [isRecording, settings.preventSleep]);
+
+  useEffect(() => {
+    if (isRecording) {
+      if (settings.preventSleep) {
+        requestKeepAwake();
+      } else {
+        releaseKeepAwake();
+      }
+    } else {
+      releaseKeepAwake();
+    }
+  }, [isRecording, settings.preventSleep]);
 
   useEffect(() => {
     const el = scrollRefTop.current;
@@ -691,7 +749,7 @@ export default function App() {
             </div>
 
             {/* 字号 */}
-            <div className="mb-2">
+            <div className="mb-5">
               <div className="flex items-baseline justify-between mb-1.5">
                 <label className="text-sm font-semibold text-slate-200">
                   转写字号
@@ -716,6 +774,35 @@ export default function App() {
               <p className="text-[11px] text-slate-500 mt-2 leading-relaxed">
                 立即生效,适用于原文与译文两栏。
               </p>
+            </div>
+
+            {/* 麦克风开启时常亮防待机锁屏 */}
+            <div className="mb-2">
+              <div className="flex items-center justify-between">
+                <div className="flex flex-col pr-2">
+                  <span className="text-sm font-semibold text-slate-200 flex items-center gap-1.5">
+                    <Sun className="w-4 h-4 text-amber-400" />
+                    屏幕常亮
+                  </span>
+                  <span className="text-[11px] text-slate-400 mt-0.5 leading-tight">
+                    开启麦克风时阻止手机屏幕自动熄屏锁屏
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => updateSettings({ preventSleep: !settings.preventSleep })}
+                  className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors cursor-pointer ${
+                    settings.preventSleep ? 'bg-amber-500' : 'bg-slate-700'
+                  }`}
+                  title="切换麦克风开启时屏幕常亮"
+                >
+                  <span
+                    className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                      settings.preventSleep ? 'translate-x-6' : 'translate-x-1'
+                    }`}
+                  />
+                </button>
+              </div>
             </div>
 
             <div className="mt-4 pt-3 border-t border-slate-800 flex items-center justify-between gap-2">
