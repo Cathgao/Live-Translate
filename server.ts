@@ -101,7 +101,7 @@ async function startServer() {
     const silenceMs = (() => {
       const raw = url.searchParams.get("silenceMs");
       const n = raw == null ? NaN : parseInt(raw, 10);
-      if (!Number.isFinite(n)) return 600;
+      if (!Number.isFinite(n)) return 1000;
       return Math.min(2000, Math.max(100, n));
     })();
 

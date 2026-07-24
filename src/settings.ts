@@ -14,7 +14,7 @@ const STORAGE_KEY = 'live-translate.settings.v1';
 const TOKEN_STORAGE_KEY = 'live-translate.token-usage.v1';
 export const SOURCE_LANGUAGES = ['Auto', 'English', 'Chinese (Simplified)', 'Spanish', 'French', 'Japanese', 'Korean', 'German'];
 export const DEFAULT_SETTINGS: Settings = {
-  silenceMs: 600,
+  silenceMs: 1000,
   fontSize: 25,
   sourceLang: 'Auto',
 };
