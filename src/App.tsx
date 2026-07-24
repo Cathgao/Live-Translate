@@ -1022,7 +1022,7 @@ export default function App() {
                 <div className="flex flex-col pr-2">
                   <span className="text-sm font-semibold text-slate-200 flex items-center gap-1.5">
                     <Sun className="w-4 h-4 text-amber-400" />
-                    麦克风常亮防待机
+                    屏幕常亮
                   </span>
                   <span className="text-[11px] text-slate-400 mt-0.5 leading-tight">
                     开启麦克风时阻止手机屏幕自动熄屏锁屏
@@ -1034,7 +1034,7 @@ export default function App() {
                   className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors cursor-pointer ${
                     settings.preventSleep ? 'bg-amber-500' : 'bg-slate-700'
                   }`}
-                  title="切换麦克风开启时屏幕常亮防待机"
+                  title="切换麦克风开启时屏幕常亮"
                 >
                   <span
                     className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
