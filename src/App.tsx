@@ -1,6 +1,83 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Mic, Square, Loader2, AlertCircle, Volume2, VolumeX, RefreshCw, Download, Settings as SettingsIcon, X, Github, Sun } from 'lucide-react';
+import { Mic, Square, Loader2, AlertCircle, Volume2, VolumeX, RefreshCw, Download, Settings as SettingsIcon, X, Github, Sun, FileText } from 'lucide-react';
 import { loadSettings, saveSettings, RANGES, vadLabel, DEFAULT_SETTINGS, SOURCE_LANGUAGES, loadTokenUsage, saveTokenUsage, clearTokenUsage } from './settings';
+
+// --- Console Log Interceptor & Downloader ---
+interface LogEntry {
+  timestamp: string;
+  level: string;
+  msg: string;
+}
+
+const MAX_LOG_ENTRIES = 3000;
+const logBuffer: LogEntry[] = [];
+
+if (typeof window !== 'undefined' && !(window as any).__console_intercepted) {
+  (window as any).__console_intercepted = true;
+  const levels: ('log' | 'warn' | 'error' | 'info')[] = ['log', 'warn', 'error', 'info'];
+
+  levels.forEach((level) => {
+    const orig = (console as any)[level];
+    (console as any)[level] = (...args: any[]) => {
+      try {
+        const timestamp = new Date().toISOString();
+        const msg = args.map((arg) => {
+          if (typeof arg === 'string') return arg;
+          if (arg instanceof Error) return `${arg.name}: ${arg.message}\n${arg.stack || ''}`;
+          try {
+            return JSON.stringify(arg);
+          } catch (_) {
+            return String(arg);
+          }
+        }).join(' ');
+        logBuffer.push({ timestamp, level, msg });
+        if (logBuffer.length > MAX_LOG_ENTRIES) {
+          logBuffer.shift();
+        }
+      } catch (_) {}
+      if (orig) {
+        orig.apply(console, args);
+      }
+    };
+  });
+
+  window.addEventListener('error', (e) => {
+    try {
+      logBuffer.push({
+        timestamp: new Date().toISOString(),
+        level: 'error',
+        msg: `[Uncaught Error] ${e.message} at ${e.filename}:${e.lineno}:${e.colno} ${e.error ? e.error.stack || '' : ''}`
+      });
+    } catch (_) {}
+  });
+
+  window.addEventListener('unhandledrejection', (e) => {
+    try {
+      logBuffer.push({
+        timestamp: new Date().toISOString(),
+        level: 'error',
+        msg: `[Unhandled Rejection] ${e.reason ? (e.reason.stack || e.reason) : e.reason}`
+      });
+    } catch (_) {}
+  });
+}
+
+function downloadConsoleLogs() {
+  const header = `=== Browser Console Logs ===\nExport Time: ${new Date().toLocaleString()}\nUser Agent: ${navigator.userAgent}\nTotal Log Entries Captured: ${logBuffer.length}\n============================\n\n`;
+  const body = logBuffer.length > 0
+    ? logBuffer.map(e => `[${e.timestamp}] [${e.level.toUpperCase()}] ${e.msg}`).join('\n')
+    : '[No console logs captured yet]';
+  const blob = new Blob([header + body], { type: 'text/plain;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  const dateStr = new Date().toISOString().replace(/[:.]/g, '-');
+  a.href = url;
+  a.download = `browser-console-logs-${dateStr}.txt`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
 
 const PCM_MIME_TYPE = 'audio/pcm;rate=16000';
 const CHUNK_SAMPLES = 1600; // 100 ms @ 16 kHz
@@ -968,8 +1045,8 @@ export default function App() {
               </div>
             </div>
 
-            <div className="mt-4 pt-3 border-t border-slate-800 flex items-center justify-between gap-2">
-              <div className="flex items-center gap-2">
+            <div className="mt-4 pt-3 border-t border-slate-800 flex items-center justify-between gap-2 flex-wrap">
+              <div className="flex items-center gap-2 flex-wrap">
                 <button
                   type="button"
                   onClick={() => {
@@ -990,6 +1067,15 @@ export default function App() {
                   title="把累计 token 计数清零"
                 >
                   清零 Token
+                </button>
+                <button
+                  type="button"
+                  onClick={downloadConsoleLogs}
+                  className="p-1.5 text-sky-300 hover:text-white bg-sky-950/60 hover:bg-sky-800 border border-sky-800/70 rounded-lg transition-colors flex items-center justify-center"
+                  title="下载控制台日志 (.txt)"
+                  aria-label="下载控制台日志"
+                >
+                  <FileText className="w-4 h-4 text-sky-400" />
                 </button>
               </div>
               <span className="text-[10px] text-slate-500 font-mono">
