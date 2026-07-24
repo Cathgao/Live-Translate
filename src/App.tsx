@@ -940,7 +940,7 @@ export default function App() {
                       翻译将实时显示在这里…
                     </div>
                   ) : (
-                    <div className="text-slate-600 italic text-2xl md:text-3xl leading-relaxed">
+                    <div className="text-slate-500 italic text-xl md:text-2xl">
                       点击下方麦克风按钮开始实时同传。
                     </div>
                   );
@@ -965,136 +965,150 @@ export default function App() {
       </main>
 
       {/* Control Bar */}
-      <footer className="min-h-24 h-auto py-3 bg-slate-900 border-t border-slate-800 flex items-center justify-between flex-wrap gap-y-3 px-4 sm:px-8 md:px-16 shrink-0 relative">
-        <div className="hidden sm:block flex-1"></div>
-
-        {/* Center Mic Button + Audio Visualizer + Token counter */}
-        <div className="flex items-center gap-3">
-          <button
-            onClick={toggleRecording}
-            disabled={isConnecting}
-            className={`w-16 h-16 sm:w-20 sm:h-20 sm:-mt-10 rounded-full ${isRecording ? 'bg-red-600 hover:bg-red-500 shadow-[0_0_35px_rgba(220,38,38,0.5)]' : 'bg-blue-600 hover:bg-blue-500 shadow-[0_0_35px_rgba(37,99,235,0.5)]'} flex items-center justify-center border-4 border-slate-950 transition-all active:scale-95 disabled:opacity-50 z-10`}
-            title={isRecording ? '点击停止录音' : '点击开始实时语音翻译'}
-          >
-            {isConnecting ? (
-              <Loader2 className="w-6 h-6 sm:w-8 sm:h-8 text-white animate-spin" />
-            ) : isRecording ? (
-              <Square className="w-5 h-5 sm:w-7 sm:h-7 text-white fill-current" />
-            ) : (
-              <Mic className="w-6 h-6 sm:w-8 sm:h-8 text-white" />
-            )}
-          </button>
-
-          <div className="flex flex-col items-start gap-1.5">
-            <div
-              className={`flex items-center gap-2 px-3 py-1.5 rounded-full border backdrop-blur transition-colors ${
+      <footer className="py-2.5 px-4 sm:px-6 bg-slate-900 border-t border-slate-800 flex items-center justify-center shrink-0 relative">
+        <div className="flex items-center gap-3 max-w-4xl w-full justify-between sm:justify-center">
+          {/* Center Mic Button + Audio Visualizer + Token counter + Action Buttons */}
+          <div className="flex items-center gap-3 sm:gap-4 flex-wrap sm:flex-nowrap">
+            <button
+              onClick={toggleRecording}
+              disabled={isConnecting}
+              className={`w-14 h-14 sm:w-16 sm:h-16 rounded-full shrink-0 ${
                 isRecording
-                  ? 'bg-slate-950/80 border-slate-800'
-                  : 'bg-red-950/40 border-red-900/60'
-              }`}
+                  ? 'bg-red-600 hover:bg-red-500 shadow-[0_0_35px_rgba(220,38,38,0.5)]'
+                  : 'bg-blue-600 hover:bg-blue-500 shadow-[0_0_35px_rgba(37,99,235,0.5)]'
+              } flex items-center justify-center border-4 border-slate-950 transition-all active:scale-95 disabled:opacity-50 z-10`}
+              title={isRecording ? '点击停止录音' : '点击开始实时语音翻译'}
             >
-              {isRecording ? (
-                <>
-                  <span className="text-[11px] text-blue-400 font-medium">麦克风已激活</span>
-                  <div className="flex items-end gap-1 h-4">
-                    <div ref={el => volumeBarsRef.current[0] = el} className="w-1 bg-blue-500 rounded-full h-2 transition-all duration-75"></div>
-                    <div ref={el => volumeBarsRef.current[1] = el} className="w-1 bg-blue-400 rounded-full h-3 transition-all duration-75"></div>
-                    <div ref={el => volumeBarsRef.current[2] = el} className="w-1 bg-blue-300 rounded-full h-4 transition-all duration-75"></div>
-                    <div ref={el => volumeBarsRef.current[3] = el} className="w-1 bg-blue-400 rounded-full h-2 transition-all duration-75"></div>
-                    <div ref={el => volumeBarsRef.current[4] = el} className="w-1 bg-blue-500 rounded-full h-3 transition-all duration-75"></div>
-                  </div>
-                </>
+              {isConnecting ? (
+                <Loader2 className="w-6 h-6 text-white animate-spin" />
+              ) : isRecording ? (
+                <Square className="w-5 h-5 text-white fill-current" />
               ) : (
-                <>
-                  <span className="text-[11px] text-red-400 font-medium">麦克风已关闭</span>
-                  <div className="flex items-center h-4">
-                    <div className="w-6 h-0.5 bg-red-500 rounded-full"></div>
-                  </div>
-                </>
+                <Mic className="w-6 h-6 text-white" />
+              )}
+            </button>
+
+            <div className="flex flex-col items-start gap-1.5 min-w-0">
+              {/* Top Row: Mic status badge + 3 Action buttons */}
+              <div className="flex items-center gap-2 flex-wrap sm:flex-nowrap">
+                <div
+                  className={`flex items-center gap-2 px-3 py-1.5 rounded-full border backdrop-blur transition-colors shrink-0 ${
+                    isRecording
+                      ? 'bg-slate-950/80 border-slate-800'
+                      : 'bg-red-950/40 border-red-900/60'
+                  }`}
+                >
+                  {isRecording ? (
+                    <>
+                      <span className="text-[11px] text-blue-400 font-medium whitespace-nowrap">麦克风已激活</span>
+                      <div className="flex items-end gap-1 h-4">
+                        <div ref={el => volumeBarsRef.current[0] = el} className="w-1 bg-blue-500 rounded-full h-2 transition-all duration-75"></div>
+                        <div ref={el => volumeBarsRef.current[1] = el} className="w-1 bg-blue-400 rounded-full h-3 transition-all duration-75"></div>
+                        <div ref={el => volumeBarsRef.current[2] = el} className="w-1 bg-blue-300 rounded-full h-4 transition-all duration-75"></div>
+                        <div ref={el => volumeBarsRef.current[3] = el} className="w-1 bg-blue-400 rounded-full h-2 transition-all duration-75"></div>
+                        <div ref={el => volumeBarsRef.current[4] = el} className="w-1 bg-blue-500 rounded-full h-3 transition-all duration-75"></div>
+                      </div>
+                    </>
+                  ) : (
+                    <>
+                      <span className="text-[11px] text-red-400 font-medium whitespace-nowrap">麦克风已关闭</span>
+                      <div className="flex items-center h-4">
+                        <div className="w-6 h-0.5 bg-red-500 rounded-full"></div>
+                      </div>
+                    </>
+                  )}
+                </div>
+
+                {/* 3 Action Buttons beside Mic Status */}
+                <div className="flex items-center gap-1.5 shrink-0">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const next = !autoPlayAudio;
+                      setAutoPlayAudio(next);
+                      translationPlayerRef.current?.setMuted(!next);
+                    }}
+                    title="切换翻译语音自动播放"
+                    className={`flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded-lg border transition-colors whitespace-nowrap shrink-0 ${
+                      autoPlayAudio
+                        ? 'text-indigo-300 bg-indigo-950/60 hover:bg-indigo-900/70 border-indigo-800/80'
+                        : 'text-slate-400 hover:text-slate-200 bg-slate-800 hover:bg-slate-700 border-slate-700'
+                    }`}
+                  >
+                    {autoPlayAudio ? (
+                      <Volume2 className="w-3.5 h-3.5 text-indigo-400 shrink-0" />
+                    ) : (
+                      <VolumeX className="w-3.5 h-3.5 shrink-0" />
+                    )}
+                    <span className="hidden md:inline whitespace-nowrap">
+                      翻译语音自动播 · {autoPlayAudio ? '开' : '关'}
+                    </span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={handleSaveTranscript}
+                    className="flex items-center gap-1.5 text-xs text-emerald-300 hover:text-white bg-emerald-950/60 hover:bg-emerald-800 px-2.5 py-1.5 rounded-lg border border-emerald-800 transition-colors whitespace-nowrap shrink-0"
+                    title="把当前累积的原文与译文保存为本地 .txt 文件"
+                  >
+                    <Download className="w-3.5 h-3.5 shrink-0" />
+                    <span className="hidden md:inline whitespace-nowrap">保存</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setOriginalBase('');
+                      setTranslatedBase('');
+                      setOriginalLive('');
+                      setTranslatedLive('');
+                      pendingOrigRef.current = '';
+                      pendingTransRef.current = '';
+                      if (segmentCommitTimer.current) {
+                        clearTimeout(segmentCommitTimer.current);
+                        segmentCommitTimer.current = null;
+                      }
+                      if (isSpeaking) window.speechSynthesis.cancel();
+                      setIsSpeaking(false);
+                    }}
+                    className="flex items-center gap-1.5 text-xs text-slate-400 hover:text-slate-200 bg-slate-800 hover:bg-slate-700 px-2.5 py-1.5 rounded-lg border border-slate-700 transition-colors whitespace-nowrap shrink-0"
+                    title="清空已显示的转写/翻译"
+                  >
+                    <RefreshCw className="w-3.5 h-3.5 shrink-0" />
+                    <span className="hidden md:inline whitespace-nowrap">清空</span>
+                  </button>
+                </div>
+              </div>
+
+              {/* Bottom Row: Token 计数 */}
+              {(isRecording || isConnecting || tokenUsage.input > 0 || tokenUsage.output > 0) && (
+                <div
+                  className={`flex items-center gap-2 px-3 py-1 rounded-full border text-[11px] font-mono shadow-sm backdrop-blur transition-colors whitespace-nowrap shrink-0 ${
+                    isRecording || isConnecting
+                      ? 'bg-slate-950/90 border-slate-700 text-slate-300'
+                      : 'bg-slate-900 border-slate-800 text-slate-500'
+                  }`}
+                  title="本次会话累计消耗的 token(来自服务端 usageMetadata)"
+                >
+                  <span className="text-slate-500">Tokens</span>
+                  <span className="text-slate-400">入</span>
+                  <span className="text-blue-300 font-semibold tabular-nums">
+                    {formatTokens(tokenUsage.input)}
+                  </span>
+                  <span className="text-slate-600">|</span>
+                  <span className="text-slate-400">出</span>
+                  <span className="text-emerald-300 font-semibold tabular-nums">
+                    {formatTokens(tokenUsage.output)}
+                  </span>
+                  <span className="text-slate-600">|</span>
+                  <span className="text-slate-400">合</span>
+                  <span className="text-white font-semibold tabular-nums">
+                    {formatTokens(tokenUsage.input + tokenUsage.output)}
+                  </span>
+                </div>
               )}
             </div>
-
-            {/* Token 计数 — 仅在录音中显示,停止后保留最后一次值 */}
-            {(isRecording || isConnecting || tokenUsage.input > 0 || tokenUsage.output > 0) && (
-              <div
-                className={`flex items-center gap-2 px-3 py-1.5 rounded-full border text-[11px] font-mono shadow-sm backdrop-blur transition-colors ${
-                  isRecording || isConnecting
-                    ? 'bg-slate-950/90 border-slate-700 text-slate-300'
-                    : 'bg-slate-900 border-slate-800 text-slate-500'
-                }`}
-                title="本次会话累计消耗的 token(来自服务端 usageMetadata)"
-              >
-                <span className="text-slate-500">Tokens</span>
-                <span className="text-slate-400">入</span>
-                <span className="text-blue-300 font-semibold tabular-nums">
-                  {formatTokens(tokenUsage.input)}
-                </span>
-                <span className="text-slate-600">|</span>
-                <span className="text-slate-400">出</span>
-                <span className="text-emerald-300 font-semibold tabular-nums">
-                  {formatTokens(tokenUsage.output)}
-                </span>
-                <span className="text-slate-600">|</span>
-                <span className="text-slate-400">合</span>
-                <span className="text-white font-semibold tabular-nums">
-                  {formatTokens(tokenUsage.input + tokenUsage.output)}
-                </span>
-              </div>
-            )}
           </div>
-        </div>
-
-        {/* Right Action buttons */}
-        <div className="flex-1 flex items-center justify-end gap-3">
-          <button
-            onClick={() => {
-              const next = !autoPlayAudio;
-              setAutoPlayAudio(next);
-              translationPlayerRef.current?.setMuted(!next);
-            }}
-            title="切换翻译语音自动播放"
-            className={`flex items-center gap-1.5 text-xs sm:px-3.5 p-2 sm:py-2 rounded-lg border transition-colors ${
-              autoPlayAudio
-                ? 'text-indigo-300 bg-indigo-950/60 hover:bg-indigo-900/70 border-indigo-800/80'
-                : 'text-slate-400 hover:text-slate-200 bg-slate-800 hover:bg-slate-700 border-slate-700'
-            }`}
-          >
-            {autoPlayAudio ? (
-              <Volume2 className="w-3.5 h-3.5 text-indigo-400" />
-            ) : (
-              <VolumeX className="w-3.5 h-3.5" />
-            )}
-            <span className="hidden sm:inline">翻译语音自动播 · {autoPlayAudio ? '开' : '关'}</span>
-          </button>
-          <button
-            onClick={handleSaveTranscript}
-            className="flex items-center gap-1.5 text-xs text-emerald-300 hover:text-white bg-emerald-950/60 hover:bg-emerald-800 sm:px-3.5 p-2 sm:py-2 rounded-lg border border-emerald-800 transition-colors"
-            title="把当前累积的原文与译文保存为本地 .txt 文件"
-          >
-            <Download className="w-3.5 h-3.5" />
-            <span className="hidden sm:inline">保存</span>
-          </button>
-          <button
-            onClick={() => {
-              setOriginalBase('');
-              setTranslatedBase('');
-              setOriginalLive('');
-              setTranslatedLive('');
-              pendingOrigRef.current = '';
-              pendingTransRef.current = '';
-              if (segmentCommitTimer.current) {
-                clearTimeout(segmentCommitTimer.current);
-                segmentCommitTimer.current = null;
-              }
-              if (isSpeaking) window.speechSynthesis.cancel();
-              setIsSpeaking(false);
-            }}
-            className="flex items-center gap-1.5 text-xs text-slate-400 hover:text-slate-200 bg-slate-800 hover:bg-slate-700 sm:px-3.5 p-2 sm:py-2 rounded-lg border border-slate-700 transition-colors"
-            title="清空已显示的转写/翻译"
-          >
-            <RefreshCw className="w-3.5 h-3.5" />
-            <span className="hidden sm:inline">清空</span>
-          </button>
         </div>
       </footer>
     </div>
