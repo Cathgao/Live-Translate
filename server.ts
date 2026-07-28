@@ -51,7 +51,17 @@ function getTargetLanguageCode(targetLang: string): string {
   return map[targetLang] || "zh";
 }
 
-function buildSetupMessage(modelName: string, targetLangCode: string, silenceMs: number) {
+function buildSetupMessage(
+  modelName: string,
+  targetLangCode: string,
+  silenceMs: number,
+  resumeHandle: string | null,
+) {
+  // Per https://ai.google.dev/gemini-api/docs/live-api/session-management the
+  // server emits `GoAway` before the BidiGenerateContent connection's hard
+  // ~10min lifetime expires. We enable `sessionResumption` so the server
+  // periodically sends a `SessionResumptionUpdate.newHandle` that we can hand
+  // to the next connection to keep the same logical session alive.
   return {
     setup: {
       model: `models/${modelName}`,
@@ -70,6 +80,7 @@ function buildSetupMessage(modelName: string, targetLangCode: string, silenceMs:
           silenceDurationMs: silenceMs,
         },
       },
+      sessionResumption: resumeHandle ? { handle: resumeHandle } : {},
     },
   };
 }
@@ -143,6 +154,29 @@ async function startServer() {
     let totalClientAudioBytes = 0;
     const sessionUsage = { input: 0, output: 0 };
 
+    // Session resumption / reconnect state. Per the official Live API
+    // session-management docs, each BidiGenerateContent connection has a hard
+    // ~10min lifetime and the server emits `GoAway` before tearing it down.
+    // We persist the latest `SessionResumptionUpdate.newHandle` so the next
+    // upstream WS can be opened with `sessionResumption: { handle }` and
+    // continue the same logical session.
+    let currentResumeHandle: string | null = null;
+    let currentHandleResumable = true;
+    let upstreamReconnectAttempts = 0;
+    let upstreamReconnectTimer: NodeJS.Timeout | null = null;
+    const MAX_UPSTREAM_RECONNECTS = 5;
+    // Tiny headroom before Gemini's declared `timeLeft` to make sure we
+    // can finish the new upstream handshake before the old one closes.
+    const GOAWAY_RECONNECT_HEADROOM_MS = 5000;
+    // When GoAway arrives we don't immediately reconnect — we wait for the
+    // current spoken segment to finish so the rotated upstream doesn't chop
+    // a sentence in half. The deadline is (timeLeft - headroom); whichever
+    // comes first wins: a `transcription_finished` / `turnComplete` /
+    // `inputTranscription.finished` / `outputTranscription.finished` signal,
+    // or the deadline.
+    let goAwaySegmentDeadline: number | null = null;
+    let goAwayReconnectPending = false;
+
     // Periodic ping/pong heartbeat to keep client <-> server and server <-> Gemini connections active during long silences
     const pingInterval = setInterval(() => {
       if (clientWs.readyState === WebSocket.OPEN) {
@@ -171,149 +205,307 @@ async function startServer() {
     }
 
     const liveUrl = `${GEMINI_LIVE_WSS}?key=${encodeURIComponent(apiKey)}`;
-    liveWs = new WebSocket(liveUrl);
 
-    const setupTimer = setTimeout(() => {
-      if (!isLiveReady && liveWs && liveWs.readyState !== WebSocket.CLOSED) {
-        console.error(
-          `[live] setupComplete not received within 15s for model=${modelName}`,
-        );
-        if (clientAlive) {
-          safeSend(clientWs, {
-            error: `Live Translate 模型 [${modelName}] 15s 内未返回 setupComplete，请检查 API key 是否对该模型拥有访问权限。`,
-          });
+    let setupTimer: NodeJS.Timeout | null = null;
+    const armSetupTimer = () => {
+      if (setupTimer) clearTimeout(setupTimer);
+      setupTimer = setTimeout(() => {
+        if (!isLiveReady && liveWs && liveWs.readyState !== WebSocket.CLOSED) {
+          console.error(
+            `[live] setupComplete not received within 15s for model=${modelName}`,
+          );
+          if (clientAlive) {
+            safeSend(clientWs, {
+              error: `Live Translate 模型 [${modelName}] 15s 内未返回 setupComplete，请检查 API key 是否对该模型拥有访问权限。`,
+            });
+          }
+          try {
+            liveWs.close();
+          } catch (_) {}
         }
+      }, 15000);
+    };
+
+    const openUpstream = () => {
+      const prev = liveWs;
+      const ws = new WebSocket(liveUrl);
+      liveWs = ws;
+      isLiveReady = false;
+      armSetupTimer();
+      // 关闭旧 upstream（如有）。新 ws 尚未 open，旧 ws 仍可正常接收残余音频直到
+      // 新 ws 走完 setup；这里的 close 是清场，关不关都不影响接管。
+      if (prev && prev !== ws) {
         try {
-          liveWs.close();
+          if (prev.readyState === WebSocket.OPEN) {
+            console.log(`[live] closing previous upstream proactively`);
+            prev.close(1000, "upstream rotated");
+          }
         } catch (_) {}
       }
-    }, 15000);
 
-    liveWs.on("open", () => {
-      console.log(`[live] upstream open, sending setup for ${modelName}`);
-      const setup = buildSetupMessage(modelName, targetLangCode, silenceMs);
-      try {
-        liveWs?.send(JSON.stringify(setup));
-      } catch (e: any) {
-        console.error("[live] failed to send setup", e);
-        if (clientAlive) {
+      ws.on("open", () => {
+        console.log(
+          `[live] upstream open, sending setup for ${modelName}` +
+            (currentResumeHandle ? ` (resuming with handle)` : ``),
+        );
+        const setup = buildSetupMessage(
+          modelName,
+          targetLangCode,
+          silenceMs,
+          currentResumeHandle,
+        );
+        try {
+          ws.send(JSON.stringify(setup));
+        } catch (e: any) {
+          console.error("[live] failed to send setup", e);
+          if (clientAlive) {
+            safeSend(clientWs, {
+              error: `向 Gemini Live 发送 setup 失败: ${e?.message || String(e)}`,
+            });
+          }
+        }
+      });
+
+      ws.on("message", (raw) => {
+        let msg: any;
+        try {
+          msg = JSON.parse(raw.toString());
+        } catch (e: any) {
+          console.error("[live] upstream message parse error", e);
+          return;
+        }
+        totalUpstreamMessages++;
+
+        // 0) SessionResumptionUpdate — 记录 resume handle（官方 session-management 文档）
+        const sru = msg.sessionResumptionUpdate;
+        if (sru && typeof sru.newHandle === "string" && sru.newHandle.length > 0) {
+          const handle = sru.newHandle;
+          currentResumeHandle = handle;
+          currentHandleResumable = !!sru.resumable;
+          // 不打日志：每 ~3s 一条太吵。但 handle 仍保留在 currentResumeHandle。
+          return;
+        }
+
+        // 0b) GoAway — 上游即将终止（连接寿命 ~10 分钟）。
+        // 不要立即重连：等待当前 segment 自然结束（seg-finish 信号），避免在
+        // 句子中间切。如果到 deadline 还没等到信号，强制重连。
+        const goAway = msg.goAway;
+        if (goAway) {
+          const timeLeftStr = goAway.timeLeft;
+          // timeLeft is a string like "50s" or "1m30s". Parse to millis.
+          let timeLeftMs = 0;
+          if (typeof timeLeftStr === "string") {
+            const m = timeLeftStr.match(/(\d+)\s*([smh])/g);
+            if (m) {
+              for (const part of m) {
+                const [, nStr, unit] = part.match(/(\d+)\s*([smh])/) || [];
+                const n = parseInt(nStr, 10);
+                if (unit === "s") timeLeftMs += n * 1000;
+                else if (unit === "m") timeLeftMs += n * 60_000;
+                else if (unit === "h") timeLeftMs += n * 3_600_000;
+              }
+            }
+          }
+          const deadline = Math.max(500, timeLeftMs - GOAWAY_RECONNECT_HEADROOM_MS);
+          goAwaySegmentDeadline = Date.now() + deadline;
+          goAwayReconnectPending = true;
+          console.warn(
+            `[live] upstream GoAway received timeLeft=${timeLeftStr} (${timeLeftMs}ms); awaiting next segment boundary (deadline in ${deadline}ms); handle=${currentResumeHandle ? "yes" : "no"}, handleResumable=${currentHandleResumable}`,
+          );
+          if (clientAlive) {
+            safeSend(clientWs, { type: "upstream_goaway", timeLeft: timeLeftStr });
+          }
+
+          // 兜底：到 deadline 强制重连（即使 segment 还没结束）
+          if (upstreamReconnectTimer) clearTimeout(upstreamReconnectTimer);
+          upstreamReconnectTimer = setTimeout(() => {
+            upstreamReconnectTimer = null;
+            if (!goAwayReconnectPending) return; // 已经在段尾提前重连过了
+            if (!clientAlive) return;
+            console.warn(
+              `[live] GoAway deadline reached without segment boundary; reconnecting upstream now`,
+            );
+            goAwayReconnectPending = false;
+            goAwaySegmentDeadline = null;
+            safeSend(clientWs, { type: "upstream_reset" });
+            openUpstream();
+          }, deadline);
+          return;
+        }
+
+        // 1) setupComplete — 会话就绪。
+        if (msg.setupComplete) {
+          isLiveReady = true;
+          if (setupTimer) {
+            clearTimeout(setupTimer);
+            setupTimer = null;
+          }
+          console.log(`[live] setupComplete for model=${modelName} (resumed=${currentResumeHandle ? "yes" : "no"})`);
+          // 新 upstream 就绪 → 重置重连计数
+          upstreamReconnectAttempts = 0;
+          return;
+        }
+
+        // 2) error
+        if (msg.error) {
+          const errText =
+            typeof msg.error === "string"
+              ? msg.error
+              : msg.error.message || JSON.stringify(msg.error);
+          console.error(`[live] upstream error: ${errText}`);
+          if (clientAlive) {
+            safeSend(clientWs, {
+              error: `Gemini Live 模型 [${modelName}] 错误: ${errText}`,
+            });
+          }
+          return;
+        }
+        const sc = msg.serverContent;
+        if (!sc) return;
+        const it = sc.inputTranscription;
+        const ot = sc.outputTranscription;
+        const hasTextChunk =
+          (typeof it?.text === "string" && it.text.length > 0) ||
+          (typeof ot?.text === "string" && ot.text.length > 0);
+        const chunkFinished =
+          !!(it?.finished || ot?.finished || sc.turnComplete);
+
+        if (hasTextChunk && clientAlive) {
+          console.log(`[diag-upstream] text-chunk origLen=${it?.text?.length || 0} transLen=${ot?.text?.length || 0} finished=${chunkFinished} turnComplete=${!!sc.turnComplete}`);
           safeSend(clientWs, {
-            error: `向 Gemini Live 发送 setup 失败: ${e?.message || String(e)}`,
+            type: "transcription",
+            originalText: it?.text || "",
+            translatedText: ot?.text || "",
+            finished: chunkFinished,
           });
         }
-      }
-    });
+        if (sc.turnComplete && clientAlive) {
+          safeSend(clientWs, { type: "transcription_finished" });
+        }
+        if (sc.interrupted && clientAlive) {
+          safeSend(clientWs, { type: "transcription_interrupted" });
+        }
 
-    liveWs.on("message", (raw) => {
-      let msg: any;
-      try {
-        msg = JSON.parse(raw.toString());
-      } catch (e: any) {
-        console.error("[live] upstream message parse error", e);
-        return;
-      }
-      totalUpstreamMessages++;
-
-      // 1) setupComplete — 会话就绪。
-      if (msg.setupComplete) {
-        isLiveReady = true;
-        clearTimeout(setupTimer);
-        console.log(`[live] setupComplete for model=${modelName}`);
-        return;
-      }
-
-      // 2) error
-      if (msg.error) {
-        const errText =
-          typeof msg.error === "string"
-            ? msg.error
-            : msg.error.message || JSON.stringify(msg.error);
-        console.error(`[live] upstream error: ${errText}`);
-        if (clientAlive) {
+        // 段尾提前重连：GoAway 等待中、且当前 segment 已结束（任意一个 finished/turnComplete）。
+        // 在 deadline 之前找到自然停顿点，立刻触发 upstream reopen（覆盖 deadline timer）。
+        if (
+          goAwayReconnectPending &&
+          clientAlive &&
+          (chunkFinished || sc.turnComplete)
+        ) {
+          const remaining = goAwaySegmentDeadline ? goAwaySegmentDeadline - Date.now() : 0;
+          console.log(
+            `[live] segment boundary reached during GoAway window; reconnecting upstream now (${remaining}ms before deadline)`,
+          );
+          goAwayReconnectPending = false;
+          goAwaySegmentDeadline = null;
+          if (upstreamReconnectTimer) {
+            clearTimeout(upstreamReconnectTimer);
+            upstreamReconnectTimer = null;
+          }
+          safeSend(clientWs, { type: "upstream_reset" });
+          openUpstream();
+        }
+        const um = msg.usageMetadata;
+        if (um && clientAlive) {
+          const deltaIn = typeof um.promptTokenCount === "number" ? um.promptTokenCount : 0;
+          const deltaOut = typeof um.responseTokenCount === "number" ? um.responseTokenCount : 0;
+          sessionUsage.input += deltaIn;
+          sessionUsage.output += deltaOut;
           safeSend(clientWs, {
-            error: `Gemini Live 模型 [${modelName}] 错误: ${errText}`,
+            type: "usage",
+            inputTokens: sessionUsage.input,
+            outputTokens: sessionUsage.output,
           });
         }
-        return;
-      }
-      const sc = msg.serverContent;
-      if (!sc) return;
-      const it = sc.inputTranscription;
-      const ot = sc.outputTranscription;
-      const hasTextChunk =
-        (typeof it?.text === "string" && it.text.length > 0) ||
-        (typeof ot?.text === "string" && ot.text.length > 0);
-      const chunkFinished =
-        !!(it?.finished || ot?.finished || sc.turnComplete);
-
-      if (hasTextChunk && clientAlive) {
-        console.log(`[diag-upstream] text-chunk origLen=${it?.text?.length || 0} transLen=${ot?.text?.length || 0} finished=${chunkFinished} turnComplete=${!!sc.turnComplete}`);
-        safeSend(clientWs, {
-          type: "transcription",
-          originalText: it?.text || "",
-          translatedText: ot?.text || "",
-          finished: chunkFinished,
-        });
-      }
-      if (sc.turnComplete && clientAlive) {
-        safeSend(clientWs, { type: "transcription_finished" });
-      }
-      if (sc.interrupted && clientAlive) {
-        safeSend(clientWs, { type: "transcription_interrupted" });
-      }
-      const um = msg.usageMetadata;
-      if (um && clientAlive) {
-        const deltaIn = typeof um.promptTokenCount === "number" ? um.promptTokenCount : 0;
-        const deltaOut = typeof um.responseTokenCount === "number" ? um.responseTokenCount : 0;
-        sessionUsage.input += deltaIn;
-        sessionUsage.output += deltaOut;
-        safeSend(clientWs, {
-          type: "usage",
-          inputTokens: sessionUsage.input,
-          outputTokens: sessionUsage.output,
-        });
-      }
-      const parts: any[] | undefined = sc.modelTurn?.parts;
-      if (Array.isArray(parts) && clientAlive) {
-        for (const part of parts) {
-          const inline = part?.inlineData || part?.inline_data;
-          if (!inline) continue;
-          const data: string | undefined = inline.data;
-          if (!data) continue;
-          const mime: string =
-            inline.mimeType || inline.mime_type || "audio/pcm;rate=24000";
-          safeSend(clientWs, {
-            type: "translation_audio",
-            audio: data,
-            mimeType: mime,
-          });
+        const parts: any[] | undefined = sc.modelTurn?.parts;
+        if (Array.isArray(parts) && clientAlive) {
+          for (const part of parts) {
+            const inline = part?.inlineData || part?.inline_data;
+            if (!inline) continue;
+            const data: string | undefined = inline.data;
+            if (!data) continue;
+            const mime: string =
+              inline.mimeType || inline.mime_type || "audio/pcm;rate=24000";
+            safeSend(clientWs, {
+              type: "translation_audio",
+              audio: data,
+              mimeType: mime,
+            });
+          }
         }
-      }
-    });
+      });
 
-    liveWs.on("error", (err: any) => {
-      const text = err?.message || String(err);
-      console.error(`[live] upstream WS error: ${text}`);
-      if (clientAlive) {
-        safeSend(clientWs, { error: `Gemini Live 连接错误: ${text}` });
-      }
-    });
+      ws.on("error", (err: any) => {
+        const text = err?.message || String(err);
+        console.error(`[live] upstream WS error: ${text}`);
+        // 不在这里给客户端发 error — close handler 会处理。
+      });
 
-    liveWs.on("close", (code, reason) => {
-      const reasonStr = reason?.toString?.() || String(reason || "");
-      const hadActivity = totalUpstreamMessages > 0 || totalClientAudioBytes > 0;
-      console.warn(
-        `[live] upstream closed code=${code} reason=${reasonStr} model=${modelName} (had setup=${isLiveReady}, upstream msgs=${totalUpstreamMessages}, client audio bytes forwarded=${totalClientAudioBytes})`,
-      );
-      isLiveReady = false;
-      // Surface unexpected closes; code 1000 right after setupComplete with
-      // no upstream traffic is a useful diagnostic too.
-      if (clientAlive && (code !== 1000 || (code === 1000 && !hadActivity))) {
-        safeSend(clientWs, {
-          error: `Gemini Live 关闭连接 (code=${code}${reasonStr ? `, reason=${reasonStr}` : ""}${!hadActivity ? ", 上下行未发生任何交互" : ""})`,
-        });
-      }
-    });
+      ws.on("close", (code, reason) => {
+        const reasonStr = reason?.toString?.() || String(reason || "");
+        const hadActivity = totalUpstreamMessages > 0 || totalClientAudioBytes > 0;
+        // 关闭的是当前这条 liveWs；如果它已经被新连接替换，记录日志但不动
+        if (liveWs !== ws) {
+          console.log(
+            `[live] old upstream closed code=${code} reason=${reasonStr} (already replaced by new upstream)`,
+          );
+          return;
+        }
+        console.warn(
+          `[live] upstream closed code=${code} reason=${reasonStr} model=${modelName} (had setup=${isLiveReady}, upstream msgs=${totalUpstreamMessages}, client audio bytes forwarded=${totalClientAudioBytes}, resumeHandle=${currentResumeHandle ? "yes" : "no"}, reconnectAttempts=${upstreamReconnectAttempts})`,
+        );
+        isLiveReady = false;
+        if (setupTimer) {
+          clearTimeout(setupTimer);
+          setupTimer = null;
+        }
+
+        // 客户端不在就退出
+        if (!clientAlive) return;
+
+        // 如果我们已经在 GoAway 之后调度了上游重连，那这次 close 是预期的，
+        // 不再走错误回传；上游 rest 连接 openUpstream 自己会开。
+        if (upstreamReconnectTimer) {
+          console.log(`[live] upstream close after GoAway: scheduled reconnect will open new upstream`);
+          return;
+        }
+
+        // 1) 异常关闭（非 1000/1008）→ 直接告诉客户端
+        if (code !== 1000 && code !== 1008) {
+          safeSend(clientWs, {
+            error: `Gemini Live 关闭连接 (code=${code}${reasonStr ? `, reason=${reasonStr}` : ""})`,
+          });
+          return;
+        }
+
+        // 2) 1000/1008 关闭但没 GoAway 调度 → 兜底重连
+        if (upstreamReconnectAttempts >= MAX_UPSTREAM_RECONNECTS) {
+          console.error(
+            `[live] upstream auto-reconnect exhausted after ${upstreamReconnectAttempts} attempts; giving up on this client`,
+          );
+          safeSend(clientWs, {
+            error: `Gemini Live 上游自动重连 ${MAX_UPSTREAM_RECONNECTS} 次仍失败，请稍后重新开始。`,
+          });
+          try { clientWs.close(); } catch (_) {}
+          return;
+        }
+        upstreamReconnectAttempts += 1;
+        const delay = Math.min(500 * Math.pow(2, upstreamReconnectAttempts - 1), 5000);
+        console.log(
+          `[live] scheduling upstream reconnect #${upstreamReconnectAttempts}/${MAX_UPSTREAM_RECONNECTS} in ${delay}ms (fallback, no GoAway)`,
+        );
+        if (upstreamReconnectTimer) clearTimeout(upstreamReconnectTimer);
+        upstreamReconnectTimer = setTimeout(() => {
+          upstreamReconnectTimer = null;
+          if (!clientAlive) return;
+          safeSend(clientWs, { type: "upstream_reset" });
+          openUpstream();
+        }, delay);
+      });
+    };
+
+    openUpstream();
 
     // --- Downstream: client -> us -> Gemini ---
 
@@ -363,11 +555,41 @@ async function startServer() {
       if (msg.action === "flush") {
         return;
       }
+
+      if (msg.action === "commit") {
+        // Client says: UI just committed a paragraph (5s silence timer fired).
+        // If we're in the GoAway window, rotate the upstream NOW at this
+        // natural boundary so the rotated session doesn't chop a sentence.
+        if (goAwayReconnectPending && clientAlive) {
+          const remaining = goAwaySegmentDeadline ? goAwaySegmentDeadline - Date.now() : 0;
+          console.log(
+            `[live] client signalled segment commit during GoAway window; reconnecting upstream now (${remaining}ms before deadline)`,
+          );
+          goAwayReconnectPending = false;
+          goAwaySegmentDeadline = null;
+          if (upstreamReconnectTimer) {
+            clearTimeout(upstreamReconnectTimer);
+            upstreamReconnectTimer = null;
+          }
+          safeSend(clientWs, { type: "upstream_reset" });
+          openUpstream();
+        }
+        return;
+      }
     });
 
     clientWs.on("close", () => {
       clientAlive = false;
-      clearTimeout(setupTimer);
+      if (setupTimer) {
+        clearTimeout(setupTimer);
+        setupTimer = null;
+      }
+      if (upstreamReconnectTimer) {
+        clearTimeout(upstreamReconnectTimer);
+        upstreamReconnectTimer = null;
+      }
+      goAwayReconnectPending = false;
+      goAwaySegmentDeadline = null;
       clearInterval(pingInterval);
       if (liveWs && liveWs.readyState === WebSocket.OPEN) {
         try {

@@ -194,6 +194,18 @@ class AudioRecorderManager {
     }
   }
 
+  /**
+   * Drop the in-progress PCM accumulator so the next chunk the worklet emits
+   * does not include stale samples that pre-date a server-side upstream reset.
+   * The AudioContext / mic stream / worklet keep running — only the buffered
+   * tail is discarded.
+   */
+  public reset() {
+    this.sampleAcc = new Int16Array(0);
+    this.lastWorkletMsgTime = Date.now();
+    console.log('[mic] recorder buffer reset (sampleAcc cleared)');
+  }
+
   private startWatchdog() {
     this.stopWatchdog();
     this.watchdogTimer = window.setInterval(async () => {
@@ -614,6 +626,25 @@ export default function App() {
           return;
         }
 
+        // upstream_goaway: 预告。如果当前 UI 没有挂起的段落（pending 已空，
+        // 即上一次 commit 已经完成），立刻发 commit 让服务端在段尾切。
+        // 否则等 5s 静默兜底 timer 触发 flushPending('timer') 时再发。
+        if (msg.type === 'upstream_goaway') {
+          console.log('[upstream_goaway] timeLeft=', msg.timeLeft);
+          const pendingEmpty =
+            pendingOrigRef.current.trim() === '' &&
+            pendingTransRef.current.trim() === '';
+          if (pendingEmpty) {
+            console.log('[upstream_goaway] pending empty; signaling commit immediately');
+            if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+              wsRef.current.send(JSON.stringify({ action: 'commit' }));
+            }
+          } else {
+            console.log('[upstream_goaway] pending non-empty; waiting for next 5s silence to commit');
+          }
+          return;
+        }
+
         const kind = msg.type || (msg.error ? 'error' : 'unknown');
         if (kind !== 'transcription' && kind !== 'translation_audio' && kind !== 'transcription_finished') {
           console.log('[ws recv]', kind, Object.keys(msg).join(','));
@@ -637,6 +668,12 @@ export default function App() {
             clearTimeout(segmentCommitTimer.current);
             segmentCommitTimer.current = null;
           }
+          // 仅当 UI 静默定时器主动 commit（reason='timer'）时通知 server。
+          // 'finished' / 'upstream_reset' 路径下 server 已知道，不需要重复。
+          // server 端只有在 GoAway 窗口内才会真正处理这个信号。
+          if (reason === 'timer' && wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+            wsRef.current.send(JSON.stringify({ action: 'commit' }));
+          }
         };
 
         const armSilenceCommit = () => {
@@ -647,6 +684,22 @@ export default function App() {
             flushPending('timer');
           }, SEGMENT_COMMIT_MS);
         };
+
+        // upstream_reset: server just rotated its Gemini Live upstream
+        // (GoAway / 10-min session limit). The WS itself is still alive — we
+        // only need to drop recorder-buffer state and flush any pending
+        // transcription so the visible transcript stays continuous.
+        if (msg.type === 'upstream_reset') {
+          console.log('[upstream_reset] server rotated upstream; flushing pending transcript and clearing recorder buffer');
+          flushPending('upstream_reset');
+          audioRecorderRef.current?.reset();
+          setReconnectStatus('上游会话已自动重置…');
+          // Clear the soft banner after a short display window so it doesn't linger.
+          setTimeout(() => {
+            setReconnectStatus((cur) => (cur === '上游会话已自动重置…' ? '' : cur));
+          }, 2500);
+          return;
+        }
 
         if (msg.type === 'transcription') {
           const origDelta = msg.originalText || '';

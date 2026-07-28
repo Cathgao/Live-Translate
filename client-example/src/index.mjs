@@ -30,6 +30,8 @@
  *     { type: "transcription_interrupted" }
  *     { type: "translation_audio", audio: "<base64>", mimeType }
  *     { type: "usage", inputTokens, outputTokens }
+ *     { type: "upstream_goaway", timeLeft }    // server-side Gemini connection is about to be rotated
+ *     { type: "upstream_reset" }              // upstream rotated; client should drop buffered PCM tail
  *     { type: "error", message }
  *
  * Run: node src/index.mjs [--source=mic|file|stdin] [--file=path]
@@ -256,24 +258,33 @@ async function main() {
   }
 
   const url = buildUrl();
-  console.log(`[${fmtTimestamp()}] connecting to ${url}`);
-  const ws = new WebSocket(url);
 
+  // Long-lived state across reconnects.
   let sampleAcc = Buffer.alloc(0);
   let isClosing = false;
-  let audio = null;
+  let isReconnecting = false;
+  let audio = null; // ffmpeg source — kept alive across WS reconnects for mic
+  let ffmpegStarted = false;
+  let ws = null;
+  let reconnectAttempts = 0;
+  let reconnectTimer = null;
+  const MAX_RECONNECT_ATTEMPTS = 5;
 
   const cleanup = async () => {
     if (isClosing) return;
     isClosing = true;
     console.log(`\n[${fmtTimestamp()}] shutting down...`);
+    if (reconnectTimer) {
+      clearTimeout(reconnectTimer);
+      reconnectTimer = null;
+    }
     try { if (audio) await audio.stop(); } catch (_) {}
     try {
-      if (ws.readyState === WebSocket.OPEN) {
+      if (ws && ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({ action: "flush" }));
       }
     } catch (_) {}
-    try { ws.close(); } catch (_) {}
+    try { if (ws) ws.close(); } catch (_) {}
     // Give the audio source a moment to actually exit (kill SIGTERM then
     // process.exit). 1500ms matches the SIGKILL escalation inside the
     // source's stop(). If audio.stop() took too long, force-exit.
@@ -282,95 +293,162 @@ async function main() {
   process.on("SIGINT", cleanup);
   process.on("SIGTERM", cleanup);
 
-  ws.on("open", async () => {
-    console.log(`[${fmtTimestamp()}] [ws] connected`);
+  // Build a fresh WS and attach the long-lived handlers. The handlers
+  // reference the closed-over `ws` variable, so we deliberately create a new
+  // socket and (when reusing the audio source) reset sampleAcc so the new
+  // server session doesn't see stale PCM tail from the old one.
+  const connect = () => {
+    console.log(`[${fmtTimestamp()}] connecting to ${url}`);
+    ws = new WebSocket(url);
 
-    try {
-      audio = await pickSource(ffmpegPath);
-    } catch (err) {
-      // Print full message (it may include raw ffmpeg stderr as guidance).
-      console.error(`[audio] ${err.message}`);
-      cleanup();
-      return;
-    }
+    ws.on("open", async () => {
+      console.log(`[${fmtTimestamp()}] [ws] connected`);
+      reconnectAttempts = 0;
+      isReconnecting = false;
+      sampleAcc = Buffer.alloc(0);
 
-    audio.start((pcmChunk) => {
-      sampleAcc = Buffer.concat([sampleAcc, pcmChunk]);
-      while (sampleAcc.length >= CHUNK_BYTES && !isClosing) {
-        const slice = sampleAcc.subarray(0, CHUNK_BYTES);
-        sampleAcc = sampleAcc.subarray(CHUNK_BYTES);
-        const b64 = arrayBufferToBase64(slice.buffer, slice.byteOffset, slice.byteLength);
-        if (ws.readyState === WebSocket.OPEN) {
-          ws.send(JSON.stringify({ audioBlob: b64, mimeType: "audio/pcm;rate=16000" }));
+      if (!ffmpegStarted) {
+        try {
+          audio = await pickSource(ffmpegPath);
+        } catch (err) {
+          // Print full message (it may include raw ffmpeg stderr as guidance).
+          console.error(`[audio] ${err.message}`);
+          cleanup();
+          return;
         }
+
+        audio.start((pcmChunk) => {
+          sampleAcc = Buffer.concat([sampleAcc, pcmChunk]);
+          while (sampleAcc.length >= CHUNK_BYTES && !isClosing) {
+            const slice = sampleAcc.subarray(0, CHUNK_BYTES);
+            sampleAcc = sampleAcc.subarray(CHUNK_BYTES);
+            const b64 = arrayBufferToBase64(slice.buffer, slice.byteOffset, slice.byteLength);
+            if (ws && ws.readyState === WebSocket.OPEN) {
+              ws.send(JSON.stringify({ audioBlob: b64, mimeType: "audio/pcm;rate=16000" }));
+            }
+          }
+        }).catch((err) => {
+          console.error(`[audio] source error: ${err.message}`);
+          cleanup();
+        });
+
+        ffmpegStarted = true;
+        if (SOURCE === "mic") {
+          console.log(`[${fmtTimestamp()}] [audio] capturing microphone — speak into it. Ctrl+C to stop.`);
+        }
+      } else {
+        console.log(`[${fmtTimestamp()}] [audio] reusing existing audio source`);
       }
-    }).catch((err) => {
-      console.error(`[audio] source error: ${err.message}`);
-      cleanup();
     });
 
-    if (SOURCE === "mic") {
-      console.log(`[${fmtTimestamp()}] [audio] capturing microphone — speak into it. Ctrl+C to stop.`);
-    }
-  });
+    ws.on("message", (raw) => {
+      let msg;
+      try {
+        msg = JSON.parse(raw.toString());
+      } catch (err) {
+        console.error(`[ws] parse error: ${err.message}`);
+        return;
+      }
 
-  ws.on("message", (raw) => {
-    let msg;
-    try {
-      msg = JSON.parse(raw.toString());
-    } catch (err) {
-      console.error(`[ws] parse error: ${err.message}`);
-      return;
-    }
+      switch (msg.type) {
+        case "connection_established":
+          console.log(`[${fmtTimestamp()}] [ws] server says hello`);
+          break;
+        case "transcription":
+          if (msg.originalText || msg.translatedText) {
+            console.log(`[${fmtTimestamp()}] [trans] 原: ${msg.originalText || ""}`);
+            console.log(`[${fmtTimestamp()}] [trans] 译: ${msg.translatedText || ""}`);
+          }
+          break;
+        case "transcription_finished":
+          // console.log(`[${fmtTimestamp()}] [trans] segment finished`);
+          break;
+        case "transcription_interrupted":
+          console.log(`[${fmtTimestamp()}] [trans] interrupted`);
+          break;
+        case "translation_audio":
+          // We don't play audio in this console reference; PCM bytes are
+          // available on msg.audio if you want to pipe them to speakers.
+          break;
+        case "usage":
+          console.log(`[${fmtTimestamp()}] [usage] tokens 入=${msg.inputTokens} 出=${msg.outputTokens}`);
+          break;
+        case "upstream_goaway":
+          // Server told us the Gemini Live upstream is about to be rotated.
+          // This is informational — `upstream_reset` follows shortly.
+          console.log(`[${fmtTimestamp()}] [upstream] GoAway timeLeft=${msg.timeLeft ?? "?"}`);
+          break;
+        case "upstream_reset":
+          // The server rotated its Gemini Live upstream. Drop our buffered
+          // PCM tail so the next chunk we send belongs to the new session.
+          console.log(`[${fmtTimestamp()}] [upstream] reset; clearing buffered PCM tail`);
+          sampleAcc = Buffer.alloc(0);
+          break;
+        case "error":
+          // Server explicitly rejected us (auth, model unavailable, etc.).
+          // Stop the audio source immediately and exit so the user sees the
+          // error and isn't left with the mic still rolling.
+          console.error(`[${fmtTimestamp()}] [error] ${msg.error || "(no message)"}`);
+          cleanup();
+          return;
+        case "ping":
+          if (ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ type: "pong" }));
+          }
+          break;
+        default:
+          console.log(`[${fmtTimestamp()}] [ws] unknown msg: ${JSON.stringify(msg).slice(0, 200)}`);
+      }
+    });
 
-    switch (msg.type) {
-      case "connection_established":
-        console.log(`[${fmtTimestamp()}] [ws] server says hello`);
-        break;
-      case "transcription":
-        if (msg.originalText || msg.translatedText) {
-          console.log(`[${fmtTimestamp()}] [trans] 原: ${msg.originalText || ""}`);
-          console.log(`[${fmtTimestamp()}] [trans] 译: ${msg.translatedText || ""}`);
-        }
-        break;
-      case "transcription_finished":
-        // console.log(`[${fmtTimestamp()}] [trans] segment finished`);
-        break;
-      case "transcription_interrupted":
-        console.log(`[${fmtTimestamp()}] [trans] interrupted`);
-        break;
-      case "translation_audio":
-        // We don't play audio in this console reference; PCM bytes are
-        // available on msg.audio if you want to pipe them to speakers.
-        break;
-      case "usage":
-        console.log(`[${fmtTimestamp()}] [usage] tokens 入=${msg.inputTokens} 出=${msg.outputTokens}`);
-        break;
-      case "error":
-        // Server explicitly rejected us (auth, model unavailable, etc.).
-        // Stop the audio source immediately and exit so the user sees the
-        // error and isn't left with the mic still rolling.
-        console.error(`[${fmtTimestamp()}] [error] ${msg.error || "(no message)"}`);
+    ws.on("error", (err) => {
+      console.error(`[ws] error: ${err.message || err}`);
+      // Don't cleanup() here — the close handler will decide whether to
+      // cleanup (user-initiated) or reconnect (unexpected).
+    });
+
+    ws.on("close", (code, reason) => {
+      const reasonStr = reason?.toString?.() || "";
+      console.log(`[${fmtTimestamp()}] [ws] closed code=${code} reason=${reasonStr}`);
+
+      if (isClosing) {
         cleanup();
         return;
-      case "ping":
-        if (ws.readyState === WebSocket.OPEN) {
-          ws.send(JSON.stringify({ type: "pong" }));
+      }
+
+      // file/stdin sources can't meaningfully resume after a WS drop — the
+      // file is already consumed / stdin already EOF'd. Refuse to reconnect.
+      if (SOURCE !== "mic" && reconnectAttempts > 0) {
+        console.error(`[ws] reconnect skipped: --source=${SOURCE} cannot resume after WS drop`);
+        cleanup();
+        return;
+      }
+
+      if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
+        console.error(`[ws] reconnect exhausted after ${MAX_RECONNECT_ATTEMPTS} attempts; exiting`);
+        cleanup();
+        return;
+      }
+
+      reconnectAttempts += 1;
+      isReconnecting = true;
+      const delay = Math.min(500 * Math.pow(2, reconnectAttempts - 1), 8000);
+      console.warn(`[ws] scheduling reconnect #${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS} in ${delay}ms`);
+      if (reconnectTimer) clearTimeout(reconnectTimer);
+      reconnectTimer = setTimeout(() => {
+        reconnectTimer = null;
+        if (isClosing) return;
+        try {
+          connect();
+        } catch (err) {
+          console.error(`[ws] reconnect failed: ${err.message}`);
+          cleanup();
         }
-        break;
-      default:
-        console.log(`[${fmtTimestamp()}] [ws] unknown msg: ${JSON.stringify(msg).slice(0, 200)}`);
-    }
-  });
+      }, delay);
+    });
+  };
 
-  ws.on("error", (err) => {
-    console.error(`[ws] error: ${err.message || err}`);
-  });
-
-  ws.on("close", (code, reason) => {
-    console.log(`[${fmtTimestamp()}] [ws] closed code=${code} reason=${reason?.toString?.() || ""}`);
-    cleanup();
-  });
+  connect();
 }
 
 main().catch((err) => {
