@@ -408,7 +408,16 @@ export default function App() {
   const pendingOrigRef = useRef<string>('');
   const pendingTransRef = useRef<string>('');
   const segmentCommitTimer = useRef<NodeJS.Timeout | null>(null);
-  const SEGMENT_COMMIT_MS = 5000;
+
+  // Read SEGMENT_COMMIT_MS from Vite env (VITE_SEGMENT_COMMIT_MS).
+  // Falls back to 5000ms when missing or invalid.
+  const parseSegmentCommitMs = (raw: unknown): number => {
+    if (raw == null || raw === '') return 5000;
+    const n = Number(raw);
+    if (!Number.isFinite(n) || n <= 0) return 5000;
+    return n;
+  };
+  const SEGMENT_COMMIT_MS = parseSegmentCommitMs(import.meta.env.VITE_SEGMENT_COMMIT_MS);
 
   const [reconnectStatus, setReconnectStatus] = useState('');
   const userStoppedRef = useRef(false);
@@ -499,7 +508,7 @@ export default function App() {
   }, [translatedBase, translatedLive]);
 
   const toggleRecording = async () => {
-    console.log('[diag] CLIENT BUILD: 5000ms-with-logs, segmentCommit=', SEGMENT_COMMIT_MS);
+    console.log(`[diag] CLIENT BUILD: segmentCommit=${SEGMENT_COMMIT_MS}ms, env=`, import.meta.env.VITE_SEGMENT_COMMIT_MS);
     if (isRecording) {
       stopRecording();
     } else {
