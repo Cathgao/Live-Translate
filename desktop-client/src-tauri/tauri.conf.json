@@ -1,0 +1,44 @@
+{
+  "$schema": "https://schema.tauri.app/config/2.0.0",
+  "productName": "Live Translate",
+  "version": "0.1.0",
+  "identifier": "com.example.live-translate-desktop",
+  "build": {
+    "frontendDist": "../dist",
+    "devUrl": "http://localhost:1420",
+    "beforeDevCommand": "npm run dev",
+    "beforeBuildCommand": "npm run build"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "Live Translate",
+        "label": "main",
+        "width": 1280,
+        "height": 800,
+        "minWidth": 360,
+        "minHeight": 600,
+        "decorations": false,
+        "transparent": false,
+        "backgroundColor": "#0f172a",
+        "resizable": true,
+        "dragDropEnabled": false,
+        "center": true,
+        "maximized": true
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["msi", "nsis"],
+    "icon": [
+      "icons/icon.ico"
+    ],
+    "category": "Productivity",
+    "shortDescription": "Live Translate desktop client",
+    "longDescription": "Real-time speech translation client with WebSocket + UART serial support."
+  }
+}

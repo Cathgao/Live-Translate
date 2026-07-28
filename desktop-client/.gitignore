@@ -1,0 +1,23 @@
+node_modules/
+dist/
+src-tauri/target/
+src-tauri/gen/
+
+# Tauri build artifacts
+*.msi
+*.nsis.zip
+*.exe
+*.app
+*.dmg
+*.deb
+*.AppImage
+
+# Editor / OS
+.DS_Store
+.vscode/
+.idea/
+*.log
+
+# local env
+.env
+.env.local
