@@ -1,0 +1,21 @@
+{
+  "name": "live-translate-client-example",
+  "version": "0.3.0",
+  "private": true,
+  "type": "module",
+  "description": "Node.js reference client that streams audio (microphone / file / stdin) to the Live Translate /live WebSocket. Audio capture is delegated to ffmpeg, so this package has no native dependencies. Receives transcription/translation events in real time and prints them to the terminal.",
+  "bin": {
+    "live-translate-client": "src/index.mjs"
+  },
+  "scripts": {
+    "start": "node src/index.mjs",
+    "start:mic": "node src/index.mjs --source=mic",
+    "start:file": "node src/index.mjs --source=file",
+    "start:stdin": "node src/index.mjs --source=stdin",
+    "check-ffmpeg": "node src/check-ffmpeg.mjs",
+    "diag:devices": "node src/diag-devices.mjs"
+  },
+  "dependencies": {
+    "ws": "^8.21.1"
+  }
+}
