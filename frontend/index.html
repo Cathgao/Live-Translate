@@ -1,0 +1,23 @@
+<!doctype html>
+<html style="height: 100%; margin: 0;" lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Gemini Live Translate</title>
+    <style>
+      body { margin: 0; height: 100%; display: flex; flex-direction: column; overflow: hidden; }
+      /* Fallback classes in case Tailwind fails to load in sandbox */
+      .h-full { height: 100%; }
+      .w-full { width: 100%; }
+      .flex { display: flex; }
+      .flex-col { flex-direction: column; }
+      .flex-1 { flex: 1 1 0%; }
+    </style>
+  </head>
+  <body>
+    <div id="root" class="h-full w-full"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
+
+

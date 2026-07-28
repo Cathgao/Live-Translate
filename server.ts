@@ -9,6 +9,14 @@ dotenv.config();
 
 const PORT = process.env.PORT ? parseInt(process.env.PORT) : 3000;
 
+// Optional token check for /live WebSocket connections.
+// When CLIENT_AUTH_TOKEN is set in .env, external clients (non-browser) must
+// include it as a `token` query string parameter when connecting to /live.
+// Web browsers do not need to provide it and will pass through unchanged.
+// Leave CLIENT_AUTH_TOKEN empty to disable authentication entirely.
+const CLIENT_AUTH_TOKEN = process.env.CLIENT_AUTH_TOKEN || "";
+const clientAuthEnabled = CLIENT_AUTH_TOKEN.length > 0;
+
 // Default per official Live Translate docs (zh-cn): gemini-3.5-live-translate-preview.
 // Allow override via env if the user's API key doesn't list that exact model.
 const DEFAULT_LIVE_TRANSLATE_MODEL = "gemini-3.5-live-translate-preview";
@@ -91,6 +99,25 @@ async function startServer() {
 
   wss.on("connection", (clientWs: WebSocket, req) => {
     const url = new URL(req.url || "", `http://${req.headers.host}`);
+
+    // Optional token check: when CLIENT_AUTH_TOKEN is set, require matching
+    // `token` query parameter. Browsers don't need to send it.
+    if (clientAuthEnabled) {
+      const provided = url.searchParams.get("token") || "";
+      if (provided !== CLIENT_AUTH_TOKEN) {
+        const remote = req.socket?.remoteAddress || "?";
+        console.warn(`[live] rejected connection from ${remote}: bad or missing token`);
+        try {
+          safeSend(clientWs, { error: "Unauthorized: invalid or missing token" });
+        } catch (_) {}
+        try {
+          clientWs.close(1008, "unauthorized");
+        } catch (_) {}
+        return;
+      }
+      console.log(`[live] token check passed for ${req.socket?.remoteAddress || "?"}`);
+    }
+
     const sourceLang = url.searchParams.get("source") || "Auto";
     const targetLang = url.searchParams.get("target") || "Chinese (Simplified)";
     const requestedModel = url.searchParams.get("model") || "";
@@ -358,13 +385,19 @@ async function startServer() {
 
   // Vite middleware for development; static for production.
   if (process.env.NODE_ENV !== "production") {
+    // Frontend lives in ./frontend; root tells Vite where to find
+    // index.html and source files. publicDir keeps /pcm-worklet.js
+    // and /translation.png accessible at the URL root.
     const vite = await createViteServer({
+      root: path.join(process.cwd(), "frontend"),
+      publicDir: path.join(process.cwd(), "frontend", "public"),
+      configFile: path.join(process.cwd(), "frontend", "vite.config.ts"),
       server: { middlewareMode: true },
       appType: "spa",
     });
     app.use(vite.middlewares);
   } else {
-    const distPath = path.join(process.cwd(), "dist");
+    const distPath = path.join(process.cwd(), "frontend", "dist");
     app.use(express.static(distPath));
     app.get("*", (_req, res) => {
       res.sendFile(path.join(distPath, "index.html"));
