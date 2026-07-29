@@ -16,6 +16,8 @@ import {
   Plug,
   Unplug,
   Trash2,
+  Check,
+  Pencil,
 } from "lucide-react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 
@@ -49,6 +51,11 @@ import {
   type Settings,
   type FrameFormat,
 } from "./settings";
+import {
+  loadConfig,
+  saveConfig,
+  validateWsUrl,
+} from "./configStore";
 
 // ---------------------------------------------------------------------------
 // Frame format helpers — bridges WS transcription messages to UART TX.
@@ -104,6 +111,9 @@ const SEGMENT_COMMIT_MS = 5000; // matches web frontend default
 
 export default function App() {
   const [settings, setSettings] = useState<Settings>(() => loadSettings());
+  // Flag: settings loaded from the OS config file on app startup. We don't
+  // auto-open the modal on every launch — only when the URL is missing.
+  const [configReady, setConfigReady] = useState(false);
   const updateSettings = (patch: Partial<Settings>) => {
     setSettings((prev) => {
       const next = { ...prev, ...patch };
@@ -265,6 +275,43 @@ export default function App() {
   }, [showSerialPanel, refreshPorts]);
 
   // -------------------------------------------------------------------------
+  // App-level config (WebSocket URL) — loaded once on startup from the OS
+  // config file. If empty, auto-open the settings dialog so the user can
+  // paste their server URL. We never overwrite the URL from a stale local
+  // copy; the file is the source of truth.
+  // -------------------------------------------------------------------------
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const cfg = await loadConfig();
+        if (cancelled) return;
+        if (cfg.wsUrl) {
+          setSettings((prev) => {
+            // Only write to localStorage once we've hydrated.
+            const next = { ...prev, wsUrl: cfg.wsUrl };
+            saveSettings(next);
+            return next;
+          });
+        } else {
+          // First launch (or a wiped config file). Open the modal so the
+          // user can't get stuck unable to record.
+          setShowSettings(true);
+        }
+      } catch (err) {
+        console.warn("[config] startup load failed:", err);
+      } finally {
+        if (!cancelled) setConfigReady(true);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const isWsConfigured = settings.wsUrl.trim().length > 0;
+
+  // -------------------------------------------------------------------------
   // WS / mic lifecycle.
   // -------------------------------------------------------------------------
 
@@ -320,6 +367,11 @@ export default function App() {
 
   const startRecording = useCallback(async () => {
     setError("");
+    if (!settings.wsUrl.trim()) {
+      setError("请先在设置里填写 WebSocket 地址。");
+      setShowSettings(true);
+      return;
+    }
     setOriginalLive("");
     setTranslatedLive("");
     pendingOrigRef.current = "";
@@ -331,6 +383,7 @@ export default function App() {
 
     const live = new LiveClient(
       {
+        wsUrl: settings.wsUrl,
         source: settings.sourceLang,
         target: settings.targetLang,
         silenceMs: settings.silenceMs,
@@ -585,6 +638,17 @@ export default function App() {
         </div>
 
         <div className="flex items-center gap-1">
+          {!isWsConfigured && (
+            <button
+              type="button"
+              onClick={() => setShowSettings(true)}
+              className="no-drag flex items-center gap-1 px-2 py-1 rounded-full text-[10px] font-mono bg-amber-950/60 border border-amber-700/70 text-amber-300 hover:bg-amber-900/70 transition-colors"
+              title="WebSocket 地址未配置，点击填写"
+            >
+              <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" />
+              <span>未配置</span>
+            </button>
+          )}
           <button
             type="button"
             onClick={() => setShowSettings(true)}
@@ -826,13 +890,19 @@ export default function App() {
       >
         <button
           onClick={toggleRecording}
-          disabled={isConnecting}
+          disabled={isConnecting || !isWsConfigured}
           className={`no-drag w-14 h-14 rounded-full shrink-0 ${
             isRecording
               ? "bg-red-600 hover:bg-red-500 shadow-[0_0_35px_rgba(220,38,38,0.5)]"
               : "bg-blue-600 hover:bg-blue-500 shadow-[0_0_35px_rgba(37,99,235,0.5)]"
-          } flex items-center justify-center border-4 border-slate-950 transition-all active:scale-95 disabled:opacity-50 z-10`}
-          title={isRecording ? "点击停止" : "点击开始实时翻译"}
+          } flex items-center justify-center border-4 border-slate-950 transition-all active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed z-10`}
+          title={
+            isRecording
+              ? "点击停止"
+              : !isWsConfigured
+                ? "请先在设置里填写 WebSocket 地址"
+                : "点击开始实时翻译"
+          }
         >
           {isConnecting ? (
             <Loader2 className="w-5 h-5 text-white animate-spin" />
@@ -1018,6 +1088,41 @@ function SettingsModal(props: {
 }) {
   const { settings, updateSettings, updateSerialSettings, onClearTokens, onClose } = props;
 
+  // WS URL edit state lives in its own buffer so the user can finish typing
+  // before we re-validate. `wsSaved` reflects what's persisted to disk so the
+  // indicator is honest about whether the on-screen value has been written.
+  const [wsDraft, setWsDraft] = useState(settings.wsUrl);
+  const [wsSaved, setWsSaved] = useState(settings.wsUrl);
+  const [wsSaving, setWsSaving] = useState(false);
+  const [wsError, setWsError] = useState<string | null>(null);
+  useEffect(() => {
+    setWsDraft(settings.wsUrl);
+    setWsSaved(settings.wsUrl);
+  }, [settings.wsUrl]);
+
+  const wsValidationError = validateWsUrl(wsDraft);
+  const wsIsDirty = wsDraft.trim() !== wsSaved.trim();
+
+  const handleSaveWs = async () => {
+    const err = validateWsUrl(wsDraft);
+    if (err) {
+      setWsError(err);
+      return;
+    }
+    setWsError(null);
+    setWsSaving(true);
+    try {
+      const trimmed = wsDraft.trim();
+      await saveConfig({ wsUrl: trimmed });
+      updateSettings({ wsUrl: trimmed });
+      setWsSaved(trimmed);
+    } catch (e: any) {
+      setWsError(`保存失败: ${e?.message ?? String(e)}`);
+    } finally {
+      setWsSaving(false);
+    }
+  };
+
   return (
     <>
       <div className="fixed inset-0 z-40 bg-slate-950/50" onClick={onClose} />
@@ -1034,6 +1139,87 @@ function SettingsModal(props: {
           >
             <X className="w-3.5 h-3.5" />
           </button>
+        </div>
+
+        {/* WebSocket URL — server endpoint the app connects to. Persisted to
+            a JSON file in the OS app-data dir (NOT to the compiled binary). */}
+        <div className="mb-4">
+          <div className="flex items-baseline justify-between mb-1.5">
+            <label className="text-xs font-semibold text-slate-200">
+              WebSocket 地址
+            </label>
+            <span
+              className={`text-[10px] font-mono ${
+                wsSaved.trim() ? "text-emerald-300" : "text-amber-300"
+              }`}
+            >
+              {wsSaved.trim() ? "已配置" : "未配置"}
+            </span>
+          </div>
+          <input
+            type="text"
+            inputMode="url"
+            spellCheck={false}
+            autoComplete="off"
+            value={wsDraft}
+            placeholder="wss://example.com:443/live"
+            onChange={(e) => {
+              setWsDraft(e.target.value);
+              if (wsError) setWsError(null);
+            }}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && wsIsDirty && !wsValidationError) {
+                e.preventDefault();
+                handleSaveWs();
+              }
+            }}
+            className={`w-full bg-slate-950 border rounded px-2 py-1.5 text-xs font-mono text-slate-100 focus:outline-none ${
+              wsValidationError
+                ? "border-red-500 focus:border-red-400"
+                : wsIsDirty
+                  ? "border-amber-500/70 focus:border-amber-400"
+                  : "border-slate-700 focus:border-blue-500"
+            }`}
+          />
+          {wsValidationError ? (
+            <p className="mt-1 text-[10px] text-red-300 font-mono">{wsValidationError}</p>
+          ) : wsError ? (
+            <p className="mt-1 text-[10px] text-red-300 font-mono">{wsError}</p>
+          ) : (
+            <p className="mt-1 text-[10px] text-slate-500 font-mono">
+              示例: wss://host:443/live（必须以 ws:// 或 wss:// 开头，带路径）
+            </p>
+          )}
+          <div className="mt-2 flex items-center gap-2">
+            <button
+              type="button"
+              onClick={handleSaveWs}
+              disabled={!wsIsDirty || !!wsValidationError || wsSaving}
+              className={`flex items-center gap-1 text-[11px] px-2 py-1 rounded transition-colors ${
+                !wsIsDirty || wsValidationError || wsSaving
+                  ? "bg-slate-800 text-slate-500 cursor-not-allowed"
+                  : "bg-blue-700 hover:bg-blue-600 text-white border border-blue-800"
+              }`}
+            >
+              {wsSaving ? (
+                <Loader2 className="w-3 h-3 animate-spin" />
+              ) : wsIsDirty ? (
+                <Pencil className="w-3 h-3" />
+              ) : (
+                <Check className="w-3 h-3" />
+              )}
+              <span>{wsSaving ? "保存中…" : wsIsDirty ? "保存" : "已保存"}</span>
+            </button>
+            {wsIsDirty && !wsSaving && (
+              <button
+                type="button"
+                onClick={() => setWsDraft(wsSaved)}
+                className="text-[11px] text-slate-400 hover:text-white px-2 py-1 rounded hover:bg-slate-800"
+              >
+                撤销
+              </button>
+            )}
+          </div>
         </div>
 
         {/* Source language */}
@@ -1118,7 +1304,10 @@ function SettingsModal(props: {
             <span>清零 Token</span>
           </button>
         </div>
-        <p className="mt-2 text-[10px] text-slate-500 font-mono">设置自动保存到本地</p>
+        <p className="mt-2 text-[10px] text-slate-500 font-mono">
+          通用设置自动保存到本地；WebSocket 地址写入
+          <span className="text-slate-400"> %LOCALAPPDATA%\Live Translate\settings.json</span>
+        </p>
       </div>
     </>
   );

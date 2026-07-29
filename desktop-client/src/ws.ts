@@ -1,21 +1,11 @@
 // WebSocket dispatch for the /live endpoint.
 //
-// Server URL is read from `VITE_WS_URL` (see `.env.example`). The same JSON
-// protocol that the browser frontend uses (see frontend/src/App.tsx:537-727).
+// The server URL is supplied at runtime by the caller (App.tsx reads it from
+// the user's settings, which are persisted to a JSON file in the OS app-data
+// directory — see src/configStore.ts and src-tauri/src/config.rs). The same
+// JSON protocol that the browser frontend uses (see frontend/src/App.tsx:537-727).
 // A simplified version without auto-reconnect, settings, or wake-lock — the
 // desktop client is single-window, so we keep the connection lifecycle simple.
-
-function resolveWsUrl(): string {
-  const url = import.meta.env.VITE_WS_URL as string | undefined;
-  if (!url || !url.trim()) {
-    throw new Error(
-      "VITE_WS_URL is not set. Copy .env.example to .env and configure it before running.",
-    );
-  }
-  return url.replace(/\/+$/, "");
-}
-
-export const WS_URL = resolveWsUrl();
 
 export type ServerMsg =
   | { type: "connection_established" }
@@ -54,6 +44,7 @@ export interface LiveCallbacks {
 }
 
 export interface LiveOptions {
+  wsUrl: string;
   source: string; // "Auto" or specific
   target: string;
   silenceMs: number;
@@ -73,13 +64,18 @@ export class LiveClient {
 
   connect() {
     this.manuallyClosed = false;
+    const baseUrl = this.opts.wsUrl.replace(/\/+$/, "");
+    if (!baseUrl) {
+      this.cb.onError("WebSocket 地址未配置，请在设置里填写。");
+      return;
+    }
     const params = new URLSearchParams({
       source: this.opts.source,
       target: this.opts.target,
       silenceMs: String(this.opts.silenceMs),
     });
     if (this.opts.token) params.set("token", this.opts.token);
-    const url = `${WS_URL}?${params.toString()}`;
+    const url = `${baseUrl}?${params.toString()}`;
     console.log(`[ws] connecting to ${url}`);
 
     const ws = new WebSocket(url);

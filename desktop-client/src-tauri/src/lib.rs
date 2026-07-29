@@ -1,5 +1,6 @@
 // Tauri 2 entry point for Live Translate desktop client.
 
+mod config;
 mod serial_mgr;
 
 use serial_mgr::{PortInfo, SerialConfig, SerialManager};
@@ -70,6 +71,8 @@ pub fn run() {
             serial_open,
             serial_close,
             serial_write,
+            config::get_config,
+            config::save_config,
             app_version,
         ])
         .run(tauri::generate_context!())

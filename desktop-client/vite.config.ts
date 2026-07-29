@@ -22,7 +22,7 @@ export default defineConfig(async () => ({
   },
 
   // Env variables starting with the item of `envPrefix` will be exposed.
-  envPrefix: ["VITE_", "TAURI_ENV_*"],
+  envPrefix: ["TAURI_ENV_*"],
   build: {
     target: "es2021",
     minify: "esbuild",

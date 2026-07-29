@@ -15,6 +15,10 @@ export const SOURCE_LANGUAGES = [
 export type FrameFormat = "prefix-multi" | "json-single";
 
 export interface Settings {
+  /** WebSocket endpoint, persisted to a JSON file in OS app-data. Not
+   *  stored in localStorage so the file is user-editable and survives
+   *  WebView data clears. */
+  wsUrl: string;
   silenceMs: number;
   fontSize: number;
   sourceLang: string;
@@ -41,6 +45,7 @@ const STORAGE_KEY = "live-translate-desktop.settings.v1";
 const TOKEN_STORAGE_KEY = "live-translate-desktop.token-usage.v1";
 
 export const DEFAULT_SETTINGS: Settings = {
+  wsUrl: "",
   silenceMs: 1000,
   fontSize: 20,
   sourceLang: "Auto",
@@ -90,6 +95,11 @@ export function loadSettings(): Settings {
       : DEFAULT_SETTINGS.targetLang;
     const serialIn = parsed?.serial ?? {};
     return {
+      // wsUrl is owned by configStore (file-backed), not localStorage.
+      // The localStorage copy is only kept for backwards compat — if it
+      // exists, prefer it over the default empty string so pre-migration
+      // users don't lose their URL.
+      wsUrl: typeof parsed?.wsUrl === "string" ? parsed.wsUrl : DEFAULT_SETTINGS.wsUrl,
       silenceMs: clamp(Number(parsed?.silenceMs), RANGES.silenceMs.min, RANGES.silenceMs.max),
       fontSize: clamp(Number(parsed?.fontSize), RANGES.fontSize.min, RANGES.fontSize.max),
       sourceLang: lang,
