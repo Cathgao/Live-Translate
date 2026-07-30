@@ -76,10 +76,17 @@ npm run tauri:dev
 - 首次 Rust 构建需要 3-10 分钟（下载并编译所有 Tauri 依赖）。
 - 之后的增量编译是秒级。
 - 应用启动后会开一个最大化无边框窗口。如果尚未配置服务端地址，会自动弹出设置弹窗让你填写。
+- 如需启动为覆盖整个屏幕的全屏，可在启动程序时附加 `-fullscreen` 参数，例如：
+
+  ```text
+  "Live Translate.exe" -fullscreen
+  ```
+
+  不带该参数时仍按默认最大化方式启动；全屏模式会覆盖包含原任务栏区域在内的整个显示器。
 
 ### WebSocket 地址配置
 
-服务端地址**不在编译期硬编码**，而是首次启动时通过设置弹窗填写，并写入：
+服务端地址首次启动时通过设置弹窗填写，并写入：
 
 | OS | 路径 |
 |---|---|
@@ -115,7 +122,7 @@ npm run tauri:build
 <wsUrl>?source=Auto&target=Chinese%20(Simplified)&silenceMs=1000[&token=...]
 ```
 
-`token` 查询参数**仅在**服务端 `CLIENT_AUTH_TOKEN` 环境变量被设置时才需要（公开服务器未设置，所以一般不需要）。
+`token` 查询参数**仅在**服务端 `CLIENT_AUTH_TOKEN` 环境变量被设置时才需要。
 
 ## UART 帧格式
 

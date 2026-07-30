@@ -63,9 +63,34 @@ fn app_version() -> String {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    let fullscreen = std::env::args_os().any(|arg| arg == "-fullscreen");
+
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(SerialManager::default())
+        .setup(move |app| {
+            if fullscreen {
+                let window = app
+                    .get_webview_window("main")
+                    .ok_or_else(|| "main window not found".to_string())?;
+                let monitor = window
+                    .current_monitor()
+                    .map_err(|error| format!("failed to get current monitor: {error}"))?
+                    .ok_or_else(|| "current monitor not found".to_string())?;
+                let position = monitor.position();
+                let size = monitor.size();
+                window
+                    .set_position(*position)
+                    .map_err(|error| format!("failed to set fullscreen position: {error}"))?;
+                window
+                    .set_size(*size)
+                    .map_err(|error| format!("failed to set fullscreen size: {error}"))?;
+                window
+                    .set_fullscreen(true)
+                    .map_err(|error| format!("failed to enter fullscreen: {error}"))?;
+            }
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             serial_list,
             serial_open,
