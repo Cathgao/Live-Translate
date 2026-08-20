@@ -4,6 +4,7 @@ import { createServer as createViteServer } from "vite";
 import { WebSocketServer, WebSocket } from "ws";
 import dotenv from "dotenv";
 import http from "http";
+import fs from "fs";
 
 dotenv.config();
 
@@ -690,7 +691,12 @@ async function startServer() {
     });
     app.use(vite.middlewares);
   } else {
-    const distPath = path.join(process.cwd(), "frontend", "dist");
+    const frontendDist = path.join(process.cwd(), "frontend", "dist");
+    const rootDist = path.join(process.cwd(), "dist");
+    const distPath =
+      fs.existsSync(frontendDist) && fs.existsSync(path.join(frontendDist, "index.html"))
+        ? frontendDist
+        : rootDist;
     app.use(express.static(distPath));
     app.get("*", (_req, res) => {
       res.sendFile(path.join(distPath, "index.html"));
