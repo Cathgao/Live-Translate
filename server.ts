@@ -28,27 +28,94 @@ const LIVE_TRANSLATE_MODEL = (
 const GEMINI_LIVE_WSS =
   "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent";
 
-// Friendly name -> BCP-47. Matches the dropdown values used in App.tsx.
+// Friendly name / language code -> BCP-47. Matches the dropdown values used in App.tsx & common language codes.
 function getTargetLanguageCode(targetLang: string): string {
+  if (!targetLang || typeof targetLang !== "string") return "zh";
+  const trimmed = targetLang.trim();
+  const lower = trimmed.toLowerCase();
+
   const map: Record<string, string> = {
-    "Chinese (Simplified)": "zh",
-    "Chinese (Traditional)": "zh-TW",
-    English: "en",
-    Japanese: "ja",
-    Korean: "ko",
-    Spanish: "es",
-    French: "fr",
-    German: "de",
-    Russian: "ru",
-    Polish: "pl",
-    Italian: "it",
-    Portuguese: "pt",
-    Arabic: "ar",
-    Hindi: "hi",
-    Vietnamese: "vi",
-    Thai: "th",
+    // English friendly names
+    "chinese (simplified)": "zh",
+    "chinese (traditional)": "zh-TW",
+    english: "en",
+    japanese: "ja",
+    korean: "ko",
+    spanish: "es",
+    french: "fr",
+    german: "de",
+    russian: "ru",
+    polish: "pl",
+    italian: "it",
+    portuguese: "pt",
+    arabic: "ar",
+    hindi: "hi",
+    vietnamese: "vi",
+    thai: "th",
+
+    // Chinese friendly names
+    "中文": "zh",
+    "简体中文": "zh",
+    "繁体中文": "zh-TW",
+    "英语": "en",
+    "英文": "en",
+    "日语": "ja",
+    "韩语": "ko",
+    "西班牙语": "es",
+    "法语": "fr",
+    "德语": "de",
+    "俄语": "ru",
+    "波兰语": "pl",
+    "意大利语": "it",
+    "葡萄牙语": "pt",
+    "阿拉伯语": "ar",
+    "印地语": "hi",
+    "越南语": "vi",
+    "泰语": "th",
+
+    // Common BCP-47 / ISO-639 codes
+    zh: "zh",
+    "zh-cn": "zh",
+    "zh-hans": "zh",
+    "zh-tw": "zh-TW",
+    "zh-hant": "zh-TW",
+    "zh-hk": "zh-TW",
+    en: "en",
+    "en-us": "en",
+    "en-gb": "en",
+    ja: "ja",
+    "ja-jp": "ja",
+    ko: "ko",
+    "ko-kr": "ko",
+    es: "es",
+    "es-es": "es",
+    fr: "fr",
+    "fr-fr": "fr",
+    de: "de",
+    "de-de": "de",
+    ru: "ru",
+    "ru-ru": "ru",
+    pl: "pl",
+    it: "it",
+    pt: "pt",
+    "pt-br": "pt",
+    "pt-pt": "pt",
+    ar: "ar",
+    hi: "hi",
+    vi: "vi",
+    th: "th",
   };
-  return map[targetLang] || "zh";
+
+  if (map[lower]) {
+    return map[lower];
+  }
+
+  // If it's already a standard 2-3 letter language code or BCP-47 tag (e.g. "nl", "id", "fil-PH"), use it directly
+  if (/^[a-zA-Z]{2,3}(-[a-zA-Z0-9]+)*$/.test(trimmed)) {
+    return trimmed;
+  }
+
+  return "zh";
 }
 
 function buildSetupMessage(
@@ -129,8 +196,18 @@ async function startServer() {
       console.log(`[live] token check passed for ${req.socket?.remoteAddress || "?"}`);
     }
 
-    const sourceLang = url.searchParams.get("source") || "Auto";
-    const targetLang = url.searchParams.get("target") || "Chinese (Simplified)";
+    const sourceLang =
+      url.searchParams.get("source") ||
+      url.searchParams.get("source_lang") ||
+      url.searchParams.get("sourceLang") ||
+      url.searchParams.get("from") ||
+      "Auto";
+    const targetLang =
+      url.searchParams.get("target") ||
+      url.searchParams.get("target_lang") ||
+      url.searchParams.get("targetLang") ||
+      url.searchParams.get("to") ||
+      "Chinese (Simplified)";
     const requestedModel = url.searchParams.get("model") || "";
     const modelName = requestedModel
       ? requestedModel.replace(/^models\//, "")
