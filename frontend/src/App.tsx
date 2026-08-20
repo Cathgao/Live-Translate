@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Mic, Square, Loader2, AlertCircle, Volume2, VolumeX, RefreshCw, Download, Settings as SettingsIcon, X, Github, Sun, FileText } from 'lucide-react';
-import { loadSettings, saveSettings, RANGES, vadLabel, DEFAULT_SETTINGS, SOURCE_LANGUAGES, loadTokenUsage, saveTokenUsage, clearTokenUsage } from './settings';
+import { loadSettings, saveSettings, RANGES, vadLabel, DEFAULT_SETTINGS, TARGET_LANGUAGES, loadTokenUsage, saveTokenUsage, clearTokenUsage } from './settings';
 
 // --- Console Log Interceptor & Downloader ---
 interface LogEntry {
@@ -384,7 +384,6 @@ export default function App() {
   const [autoPlayAudio, setAutoPlayAudio] = useState(false); // OFF by default
 
   const [settings, setSettings] = useState(() => loadSettings());
-  const sourceLang = settings.sourceLang;
   const [showSettings, setShowSettings] = useState(false);
 
   const [tokenUsage, setTokenUsageState] = useState(() => loadTokenUsage());
@@ -461,7 +460,7 @@ export default function App() {
     setIsKeepAwakeActive(false);
   };
 
-  const LANGUAGES = SOURCE_LANGUAGES;
+  const LANGUAGES = TARGET_LANGUAGES;
 
   useEffect(() => {
     const handleVisibilityChange = async () => {
@@ -536,7 +535,7 @@ export default function App() {
 
   const connectWebSocket = () => {
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const wsUrl = `${protocol}//${window.location.host}/live?source=${encodeURIComponent(sourceLang)}&target=${encodeURIComponent(targetLang)}&silenceMs=${encodeURIComponent(String(settings.silenceMs))}`;
+    const wsUrl = `${protocol}//${window.location.host}/live?target=${encodeURIComponent(targetLang)}&silenceMs=${encodeURIComponent(String(settings.silenceMs))}`;
 
     let ws: WebSocket;
     try {
@@ -835,7 +834,7 @@ export default function App() {
     const header = [
       `Gemini 实时同传 — 保存的会话记录`,
       `保存时间: ${new Date().toLocaleString()}`,
-      `源语言: ${sourceLang}    目标语言: ${targetLang}`,
+      `目标语言: ${targetLang}`,
       `Token 累计(本次保存时刻): 入 ${tokenUsage.input} · 出 ${tokenUsage.output} · 合计 ${tokenUsage.input + tokenUsage.output}`,
       '=' .repeat(60),
       '',
@@ -883,7 +882,7 @@ export default function App() {
               className="bg-transparent font-medium focus:outline-none cursor-pointer text-slate-100 disabled:opacity-50 appearance-none"
               title="目标语言"
             >
-              {LANGUAGES.filter(l => l !== 'Auto').map(lang => <option key={lang} value={lang} className="bg-slate-800 text-slate-100">{lang}</option>)}
+              {LANGUAGES.map(lang => <option key={lang} value={lang} className="bg-slate-800 text-slate-100">{lang}</option>)}
             </select>
           </div>
 
@@ -966,34 +965,6 @@ export default function App() {
               </div>
               <p className="text-[11px] text-slate-500 mt-2 leading-relaxed">
                 服务端识别静音多久后判定一句话结束。在下次新建连接时生效。
-              </p>
-            </div>
-
-            {/* 源语言 */}
-            <div className="mb-5">
-              <div className="flex items-baseline justify-between mb-1.5">
-                <label className="text-sm font-semibold text-slate-200">
-                  源语言
-                </label>
-                <span className="text-[11px] text-slate-400">
-                  默认 <span className="text-blue-300 font-mono">Auto</span>(自动检测)
-                </span>
-              </div>
-              <select
-                value={settings.sourceLang}
-                onChange={(e) => updateSettings({ sourceLang: e.target.value })}
-                disabled={isRecording || isConnecting}
-                className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-100 focus:outline-none focus:border-blue-500 cursor-pointer disabled:opacity-50"
-                title="源语言(Auto 表示由 Gemini 自动检测)"
-              >
-                {LANGUAGES.map(lang => (
-                  <option key={lang} value={lang} className="bg-slate-900 text-slate-100">
-                    {lang === 'Auto' ? `${lang} (自动检测)` : lang}
-                  </option>
-                ))}
-              </select>
-              <p className="text-[11px] text-slate-500 mt-2 leading-relaxed">
-                指定说话语言或交给模型自动判断。在下次新建连接时生效。
               </p>
             </div>
 

@@ -2,7 +2,6 @@
 export type Settings = {
   silenceMs: number;
   fontSize: number;
-  sourceLang: string;
   preventSleep: boolean;
 };
 
@@ -13,11 +12,27 @@ export type TokenUsage = {
 
 const STORAGE_KEY = 'live-translate.settings.v1';
 const TOKEN_STORAGE_KEY = 'live-translate.token-usage.v1';
-export const SOURCE_LANGUAGES = ['Auto', 'English', 'Chinese (Simplified)', 'Spanish', 'French', 'Japanese', 'Korean', 'German'];
+export const TARGET_LANGUAGES = [
+  'Chinese (Simplified)',
+  'Chinese (Traditional)',
+  'English',
+  'Japanese',
+  'Korean',
+  'Spanish',
+  'French',
+  'German',
+  'Russian',
+  'Portuguese',
+  'Italian',
+  'Arabic',
+  'Hindi',
+  'Vietnamese',
+  'Thai',
+  'Polish',
+];
 export const DEFAULT_SETTINGS: Settings = {
   silenceMs: 1000,
   fontSize: 25,
-  sourceLang: 'Auto',
   preventSleep: true,
 };
 
@@ -42,9 +57,6 @@ export function loadSettings(): Settings {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return { ...DEFAULT_SETTINGS };
     const parsed = JSON.parse(raw);
-    const lang = typeof parsed?.sourceLang === 'string' && SOURCE_LANGUAGES.includes(parsed.sourceLang)
-      ? parsed.sourceLang
-      : DEFAULT_SETTINGS.sourceLang;
     return {
       silenceMs: clamp(
         Number(parsed?.silenceMs),
@@ -56,7 +68,6 @@ export function loadSettings(): Settings {
         RANGES.fontSize.min,
         RANGES.fontSize.max,
       ),
-      sourceLang: lang,
       preventSleep: typeof parsed?.preventSleep === 'boolean' ? parsed.preventSleep : DEFAULT_SETTINGS.preventSleep,
     };
   } catch {

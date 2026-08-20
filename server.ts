@@ -196,12 +196,6 @@ async function startServer() {
       console.log(`[live] token check passed for ${req.socket?.remoteAddress || "?"}`);
     }
 
-    const sourceLang =
-      url.searchParams.get("source") ||
-      url.searchParams.get("source_lang") ||
-      url.searchParams.get("sourceLang") ||
-      url.searchParams.get("from") ||
-      "Auto";
     const targetLang =
       url.searchParams.get("target") ||
       url.searchParams.get("target_lang") ||
@@ -221,7 +215,7 @@ async function startServer() {
     })();
 
     console.log(
-      `[live] client connected. source=${sourceLang} target=${targetLang} (${targetLangCode}) model=${modelName} silenceMs=${silenceMs}`,
+      `[live] client connected. target=${targetLang} (${targetLangCode}) model=${modelName} silenceMs=${silenceMs}`,
     );
 
     let liveWs: WebSocket | null = null;
